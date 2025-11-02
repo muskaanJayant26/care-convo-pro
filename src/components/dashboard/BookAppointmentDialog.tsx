@@ -31,17 +31,25 @@ const BookAppointmentDialog = ({ userId, onAppointmentBooked }: BookAppointmentD
 
   useEffect(() => {
     const fetchDoctors = async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('user_roles')
-        .select('user_id, specialization, profiles!inner(id, full_name)')
+        .select('user_id, specialization, profiles(id, full_name)')
         .eq('role', 'doctor');
+
+      console.log('Fetching doctors:', { data, error });
+
+      if (error) {
+        console.error('Error fetching doctors:', error);
+        return;
+      }
 
       if (data) {
         const doctorList: Doctor[] = data.map((d: any) => ({
           id: d.user_id,
-          full_name: d.profiles.full_name,
+          full_name: d.profiles?.full_name || 'Unknown',
           specialization: d.specialization || 'General Practice',
         }));
+        console.log('Doctor list:', doctorList);
         setDoctors(doctorList);
       }
     };
