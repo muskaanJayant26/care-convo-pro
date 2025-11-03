@@ -40,46 +40,49 @@ const DoctorDashboard = ({ user }: DoctorDashboardProps) => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-secondary/5">
-      <nav className="bg-card border-b">
-        <div className="container mx-auto px-4 py-4 flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 bg-secondary rounded-full flex items-center justify-center">
-              <Activity className="w-5 h-5 text-secondary-foreground" />
+    <div className="min-h-screen bg-gradient-to-br from-secondary/5 via-background to-primary/5">
+      <nav className="bg-card/80 backdrop-blur-md border-b shadow-sm sticky top-0 z-50">
+        <div className="container mx-auto px-6 py-4 flex justify-between items-center">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 bg-gradient-to-br from-secondary to-secondary/80 rounded-xl flex items-center justify-center shadow-secondary">
+              <Activity className="w-6 h-6 text-secondary-foreground" />
             </div>
             <div>
-              <h1 className="text-xl font-bold">Doctor Portal</h1>
+              <h1 className="text-xl font-bold bg-gradient-to-r from-secondary to-secondary/70 bg-clip-text text-transparent">Doctor Portal</h1>
               <p className="text-sm text-muted-foreground">Dr. {profile?.full_name}</p>
             </div>
           </div>
-          <Button variant="outline" onClick={handleSignOut}>
+          <Button variant="outline" onClick={handleSignOut} className="hover:bg-destructive/10 hover:text-destructive hover:border-destructive transition-colors">
             <LogOut className="w-4 h-4 mr-2" />
             Logout
           </Button>
         </div>
       </nav>
 
-      <div className="container mx-auto px-4 py-8">
-        <Tabs defaultValue="appointments" className="space-y-4">
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="appointments">
+      <div className="container mx-auto px-6 py-10">
+        <Tabs defaultValue="appointments" className="space-y-6">
+          <TabsList className="grid w-full grid-cols-3 bg-muted/50 p-1.5 h-auto">
+            <TabsTrigger value="appointments" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <Calendar className="w-4 h-4 mr-2" />
               Appointments
             </TabsTrigger>
-            <TabsTrigger value="consultations">
+            <TabsTrigger value="consultations" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <FileText className="w-4 h-4 mr-2" />
               Consultations
             </TabsTrigger>
-            <TabsTrigger value="notifications">
+            <TabsTrigger value="notifications" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <Bell className="w-4 h-4 mr-2" />
               Notifications
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="appointments">
-            <Card>
+          <TabsContent value="appointments" className="animate-in fade-in-50 duration-300">
+            <Card className="border-primary/10">
               <CardHeader>
-                <CardTitle>Patient Appointments</CardTitle>
+                <CardTitle className="text-2xl flex items-center gap-2">
+                  <Calendar className="w-6 h-6 text-primary" />
+                  Patient Appointments
+                </CardTitle>
                 <CardDescription>Manage your patient appointments</CardDescription>
               </CardHeader>
               <CardContent>
@@ -88,10 +91,13 @@ const DoctorDashboard = ({ user }: DoctorDashboardProps) => {
             </Card>
           </TabsContent>
 
-          <TabsContent value="consultations">
-            <Card>
+          <TabsContent value="consultations" className="animate-in fade-in-50 duration-300">
+            <Card className="border-secondary/10">
               <CardHeader>
-                <CardTitle>Consultations</CardTitle>
+                <CardTitle className="text-2xl flex items-center gap-2">
+                  <FileText className="w-6 h-6 text-secondary" />
+                  Consultations
+                </CardTitle>
                 <CardDescription>View and manage consultation records</CardDescription>
               </CardHeader>
               <CardContent>
@@ -100,10 +106,13 @@ const DoctorDashboard = ({ user }: DoctorDashboardProps) => {
             </Card>
           </TabsContent>
 
-          <TabsContent value="notifications">
-            <Card>
+          <TabsContent value="notifications" className="animate-in fade-in-50 duration-300">
+            <Card className="border-accent/10">
               <CardHeader>
-                <CardTitle>Notifications</CardTitle>
+                <CardTitle className="text-2xl flex items-center gap-2">
+                  <Bell className="w-6 h-6 text-accent" />
+                  Notifications
+                </CardTitle>
                 <CardDescription>Stay updated with appointment requests</CardDescription>
               </CardHeader>
               <CardContent>

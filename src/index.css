@@ -51,6 +51,19 @@ All colors MUST be HSL.
     --success-foreground: 0 0% 100%;
     --warning: 38 92% 50%;
     --warning-foreground: 0 0% 100%;
+
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(0 85% 50%) 0%, hsl(0 75% 45%) 100%);
+    --gradient-secondary: linear-gradient(135deg, hsl(142 76% 36%) 0%, hsl(142 70% 30%) 100%);
+    --gradient-bg: linear-gradient(135deg, hsl(0 85% 98%) 0%, hsl(0 0% 100%) 50%, hsl(142 76% 98%) 100%);
+    
+    /* Shadows */
+    --shadow-sm: 0 1px 2px 0 hsl(0 0% 0% / 0.05);
+    --shadow-md: 0 4px 6px -1px hsl(0 0% 0% / 0.1), 0 2px 4px -2px hsl(0 0% 0% / 0.1);
+    --shadow-lg: 0 10px 15px -3px hsl(0 0% 0% / 0.1), 0 4px 6px -4px hsl(0 0% 0% / 0.1);
+    --shadow-xl: 0 20px 25px -5px hsl(0 0% 0% / 0.1), 0 8px 10px -6px hsl(0 0% 0% / 0.1);
+    --shadow-primary: 0 4px 14px 0 hsl(0 85% 50% / 0.2);
+    --shadow-secondary: 0 4px 14px 0 hsl(142 76% 36% / 0.2);
   }
 
   .dark {
@@ -81,6 +94,7 @@ All colors MUST be HSL.
     --border: 0 0% 25%;
     --input: 0 0% 25%;
     --ring: 0 85% 50%;
+    
     --sidebar-background: 0 0% 10%;
     --sidebar-foreground: 0 0% 98%;
     --sidebar-primary: 0 85% 50%;
@@ -89,6 +103,19 @@ All colors MUST be HSL.
     --sidebar-accent-foreground: 0 0% 98%;
     --sidebar-border: 0 0% 25%;
     --sidebar-ring: 0 85% 50%;
+
+    /* Gradients - Dark Mode */
+    --gradient-primary: linear-gradient(135deg, hsl(0 85% 40%) 0%, hsl(0 75% 35%) 100%);
+    --gradient-secondary: linear-gradient(135deg, hsl(142 76% 28%) 0%, hsl(142 70% 24%) 100%);
+    --gradient-bg: linear-gradient(135deg, hsl(0 0% 10%) 0%, hsl(0 0% 12%) 50%, hsl(142 20% 12%) 100%);
+    
+    /* Shadows - Dark Mode */
+    --shadow-sm: 0 1px 2px 0 hsl(0 0% 0% / 0.3);
+    --shadow-md: 0 4px 6px -1px hsl(0 0% 0% / 0.4), 0 2px 4px -2px hsl(0 0% 0% / 0.4);
+    --shadow-lg: 0 10px 15px -3px hsl(0 0% 0% / 0.5), 0 4px 6px -4px hsl(0 0% 0% / 0.5);
+    --shadow-xl: 0 20px 25px -5px hsl(0 0% 0% / 0.6), 0 8px 10px -6px hsl(0 0% 0% / 0.6);
+    --shadow-primary: 0 4px 14px 0 hsl(0 85% 40% / 0.3);
+    --shadow-secondary: 0 4px 14px 0 hsl(142 76% 28% / 0.3);
   }
 }
 
