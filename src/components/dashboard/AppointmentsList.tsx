@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { format } from 'date-fns';
 import { CheckCircle2, XCircle, Calendar, User } from 'lucide-react';
 import AddConsultationDialog from './AddConsultationDialog';
+import ChatDialog from '../chat/ChatDialog';
 
 interface Appointment {
   id: string;
@@ -214,7 +215,27 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
           )}
 
           {role === 'doctor' && apt.status === 'confirmed' && (
-            <AddConsultationDialog appointmentId={apt.id} onConsultationAdded={fetchAppointments} />
+            <div className="flex gap-2">
+              <AddConsultationDialog appointmentId={apt.id} onConsultationAdded={fetchAppointments} />
+              <ChatDialog
+                appointmentId={apt.id}
+                patientId={apt.patient_id}
+                doctorId={apt.doctor_id}
+                currentUserId={userId}
+                otherUserName={apt.patient.full_name}
+                variant="outline"
+              />
+            </div>
+          )}
+
+          {role === 'patient' && apt.status === 'confirmed' && (
+            <ChatDialog
+              appointmentId={apt.id}
+              patientId={apt.patient_id}
+              doctorId={apt.doctor_id}
+              currentUserId={userId}
+              otherUserName={`Dr. ${apt.doctor.full_name}`}
+            />
           )}
 
           {role === 'patient' && apt.status === 'pending' && (

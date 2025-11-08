@@ -62,6 +62,38 @@ export type Database = {
           },
         ]
       }
+      chat_rooms: {
+        Row: {
+          appointment_id: string
+          created_at: string
+          doctor_id: string
+          id: string
+          patient_id: string
+        }
+        Insert: {
+          appointment_id: string
+          created_at?: string
+          doctor_id: string
+          id?: string
+          patient_id: string
+        }
+        Update: {
+          appointment_id?: string
+          created_at?: string
+          doctor_id?: string
+          id?: string
+          patient_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_rooms_appointment_id_fkey"
+            columns: ["appointment_id"]
+            isOneToOne: true
+            referencedRelation: "appointments"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       consultations: {
         Row: {
           ai_summary: string | null
@@ -93,6 +125,38 @@ export type Database = {
             columns: ["appointment_id"]
             isOneToOne: true
             referencedRelation: "appointments"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      messages: {
+        Row: {
+          chat_room_id: string
+          created_at: string
+          id: string
+          message: string
+          sender_id: string
+        }
+        Insert: {
+          chat_room_id: string
+          created_at?: string
+          id?: string
+          message: string
+          sender_id: string
+        }
+        Update: {
+          chat_room_id?: string
+          created_at?: string
+          id?: string
+          message?: string
+          sender_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "messages_chat_room_id_fkey"
+            columns: ["chat_room_id"]
+            isOneToOne: false
+            referencedRelation: "chat_rooms"
             referencedColumns: ["id"]
           },
         ]
