@@ -13,6 +13,7 @@ interface ChatDialogProps {
   currentUserId: string;
   otherUserName: string;
   variant?: 'default' | 'outline' | 'ghost';
+  onBookGeneralPhysician?: () => void;
 }
 
 const ChatDialog = ({ 
@@ -21,7 +22,8 @@ const ChatDialog = ({
   doctorId, 
   currentUserId, 
   otherUserName,
-  variant = 'default'
+  variant = 'default',
+  onBookGeneralPhysician
 }: ChatDialogProps) => {
   const [open, setOpen] = useState(false);
   const [chatRoomId, setChatRoomId] = useState<string | null>(null);
@@ -87,6 +89,8 @@ const ChatDialog = ({
             chatRoomId={chatRoomId} 
             currentUserId={currentUserId} 
             otherUserName={otherUserName}
+            otherUserId={currentUserId === patientId ? doctorId : patientId}
+            onBookGeneralPhysician={onBookGeneralPhysician}
           />
         )}
       </DialogContent>

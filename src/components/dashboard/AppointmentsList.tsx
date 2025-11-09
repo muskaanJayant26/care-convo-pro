@@ -7,6 +7,7 @@ import { format } from 'date-fns';
 import { CheckCircle2, XCircle, Calendar, User } from 'lucide-react';
 import AddConsultationDialog from './AddConsultationDialog';
 import ChatDialog from '../chat/ChatDialog';
+import { useNavigate } from 'react-router-dom';
 
 interface Appointment {
   id: string;
@@ -26,6 +27,7 @@ interface AppointmentsListProps {
 
 const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
   const { toast } = useToast();
+  const navigate = useNavigate();
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -235,6 +237,7 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
               doctorId={apt.doctor_id}
               currentUserId={userId}
               otherUserName={`Dr. ${apt.doctor.full_name}`}
+              onBookGeneralPhysician={() => navigate('/dashboard')}
             />
           )}
 

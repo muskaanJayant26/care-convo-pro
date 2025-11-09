@@ -18,9 +18,11 @@ interface ChatInterfaceProps {
   chatRoomId: string;
   currentUserId: string;
   otherUserName: string;
+  otherUserId: string;
+  onBookGeneralPhysician?: () => void;
 }
 
-const ChatInterface = ({ chatRoomId, currentUserId, otherUserName }: ChatInterfaceProps) => {
+const ChatInterface = ({ chatRoomId, currentUserId, otherUserName, otherUserId, onBookGeneralPhysician }: ChatInterfaceProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
@@ -51,6 +53,37 @@ const ChatInterface = ({ chatRoomId, currentUserId, otherUserName }: ChatInterfa
       supabase.removeChannel(channel);
     };
   }, [chatRoomId]);
+
+  useEffect(() => {
+    // Send automated welcome message for patients
+    const sendAutomatedMessage = async () => {
+      if (messages.length === 0) {
+        // Check if this is a patient viewing the chat
+        const { data: profile } = await supabase
+          .from('user_roles')
+          .select('role')
+          .eq('user_id', currentUserId)
+          .single();
+
+        if (profile?.role === 'patient') {
+          const automatedMessage = `Welcome! I'm here to help you. If you need immediate consultation with a general physician, please use the "Book General Physician" button below.`;
+          
+          // Insert automated message from the doctor
+          await supabase
+            .from('messages')
+            .insert({
+              chat_room_id: chatRoomId,
+              sender_id: otherUserId,
+              message: automatedMessage
+            });
+        }
+      }
+    };
+
+    if (messages.length === 0) {
+      sendAutomatedMessage();
+    }
+  }, [messages, chatRoomId, currentUserId, otherUserId]);
 
   useEffect(() => {
     // Scroll to bottom when new messages arrive
@@ -136,7 +169,16 @@ const ChatInterface = ({ chatRoomId, currentUserId, otherUserName }: ChatInterfa
         </div>
       </ScrollArea>
 
-      <div className="p-4 border-t bg-card">
+      <div className="p-4 border-t bg-card space-y-3">
+        {onBookGeneralPhysician && (
+          <Button 
+            onClick={onBookGeneralPhysician}
+            variant="outline"
+            className="w-full border-primary/20 hover:bg-primary/10"
+          >
+            Book General Physician Appointment
+          </Button>
+        )}
         <div className="flex gap-2">
           <Input
             value={newMessage}
