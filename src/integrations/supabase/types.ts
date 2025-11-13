@@ -14,6 +14,39 @@ export type Database = {
   }
   public: {
     Tables: {
+      ai_insights: {
+        Row: {
+          content: string
+          generated_at: string
+          id: string
+          insight_type: string
+          is_read: boolean
+          patient_id: string
+          severity: string
+          title: string
+        }
+        Insert: {
+          content: string
+          generated_at?: string
+          id?: string
+          insight_type: string
+          is_read?: boolean
+          patient_id: string
+          severity?: string
+          title: string
+        }
+        Update: {
+          content?: string
+          generated_at?: string
+          id?: string
+          insight_type?: string
+          is_read?: boolean
+          patient_id?: string
+          severity?: string
+          title?: string
+        }
+        Relationships: []
+      }
       appointments: {
         Row: {
           appointment_date: string
@@ -128,6 +161,51 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      medical_records: {
+        Row: {
+          created_at: string
+          description: string | null
+          file_url: string | null
+          id: string
+          patient_id: string
+          record_type: string
+          recorded_date: string
+          test_name: string | null
+          test_results: Json | null
+          title: string
+          updated_at: string
+          uploaded_by: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          file_url?: string | null
+          id?: string
+          patient_id: string
+          record_type: string
+          recorded_date: string
+          test_name?: string | null
+          test_results?: Json | null
+          title: string
+          updated_at?: string
+          uploaded_by: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          file_url?: string | null
+          id?: string
+          patient_id?: string
+          record_type?: string
+          recorded_date?: string
+          test_name?: string | null
+          test_results?: Json | null
+          title?: string
+          updated_at?: string
+          uploaded_by?: string
+        }
+        Relationships: []
       }
       messages: {
         Row: {

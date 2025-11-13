@@ -7,12 +7,14 @@ import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Calendar, FileText, Bell, LogOut, Activity } from 'lucide-react';
+import { Calendar, FileText, Bell, LogOut, Activity, Brain, Folder } from 'lucide-react';
 import BookAppointmentDialog from './BookAppointmentDialog';
 import AppointmentsList from './AppointmentsList';
 import ConsultationsList from './ConsultationsList';
 import NotificationsList from './NotificationsList';
 import GeneralPhysicianChat from './GeneralPhysicianChat';
+import MedicalRecordsList from './MedicalRecordsList';
+import AIInsightsList from './AIInsightsList';
 
 interface PatientDashboardProps {
   user: User;
@@ -75,7 +77,7 @@ const PatientDashboard = ({ user }: PatientDashboardProps) => {
         </div>
 
         <Tabs defaultValue="appointments" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-3 bg-muted/50 p-1.5 h-auto">
+          <TabsList className="grid w-full grid-cols-5 bg-muted/50 p-1.5 h-auto">
             <TabsTrigger value="appointments" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <Calendar className="w-4 h-4 mr-2" />
               Appointments
@@ -83,6 +85,14 @@ const PatientDashboard = ({ user }: PatientDashboardProps) => {
             <TabsTrigger value="consultations" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <FileText className="w-4 h-4 mr-2" />
               Consultations
+            </TabsTrigger>
+            <TabsTrigger value="records" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
+              <Folder className="w-4 h-4 mr-2" />
+              Records
+            </TabsTrigger>
+            <TabsTrigger value="insights" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
+              <Brain className="w-4 h-4 mr-2" />
+              AI Insights
             </TabsTrigger>
             <TabsTrigger value="notifications" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <Bell className="w-4 h-4 mr-2" />
@@ -116,6 +126,36 @@ const PatientDashboard = ({ user }: PatientDashboardProps) => {
               </CardHeader>
               <CardContent>
                 <ConsultationsList userId={user.id} role="patient" />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="records" className="animate-in fade-in-50 duration-300">
+            <Card className="border-primary/10">
+              <CardHeader>
+                <CardTitle className="text-2xl flex items-center gap-2">
+                  <Folder className="w-6 h-6 text-primary" />
+                  Medical Records
+                </CardTitle>
+                <CardDescription>View your test results and medical documents</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <MedicalRecordsList patientId={user.id} />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="insights" className="animate-in fade-in-50 duration-300">
+            <Card className="border-secondary/10">
+              <CardHeader>
+                <CardTitle className="text-2xl flex items-center gap-2">
+                  <Brain className="w-6 h-6 text-secondary" />
+                  AI Health Insights
+                </CardTitle>
+                <CardDescription>Get personalized health recommendations powered by AI</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <AIInsightsList patientId={user.id} />
               </CardContent>
             </Card>
           </TabsContent>

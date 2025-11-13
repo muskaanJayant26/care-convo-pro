@@ -1,1 +1,7 @@
 project_id = "azcjfcgbpxatdabekhjj"
+
+[functions.generate-consultation-summary]
+verify_jwt = false
+
+[functions.generate-health-insights]
+verify_jwt = true
