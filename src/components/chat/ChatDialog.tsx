@@ -7,7 +7,7 @@ import { useToast } from '@/hooks/use-toast';
 import ChatInterface from './ChatInterface';
 
 interface ChatDialogProps {
-  appointmentId: string;
+  appointmentId?: string;
   patientId: string;
   doctorId: string;
   currentUserId: string;
@@ -37,11 +37,19 @@ const ChatDialog = ({
 
   const getOrCreateChatRoom = async () => {
     // First check if chat room exists
-    const { data: existing } = await supabase
+    const query = supabase
       .from('chat_rooms')
       .select('id')
-      .eq('appointment_id', appointmentId)
-      .single();
+      .eq('patient_id', patientId)
+      .eq('doctor_id', doctorId);
+    
+    if (appointmentId) {
+      query.eq('appointment_id', appointmentId);
+    } else {
+      query.is('appointment_id', null);
+    }
+
+    const { data: existing } = await query.single();
 
     if (existing) {
       setChatRoomId(existing.id);
@@ -52,7 +60,7 @@ const ChatDialog = ({
     const { data, error } = await supabase
       .from('chat_rooms')
       .insert({
-        appointment_id: appointmentId,
+        appointment_id: appointmentId || null,
         patient_id: patientId,
         doctor_id: doctorId
       })

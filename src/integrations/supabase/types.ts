@@ -64,21 +64,21 @@ export type Database = {
       }
       chat_rooms: {
         Row: {
-          appointment_id: string
+          appointment_id: string | null
           created_at: string
           doctor_id: string
           id: string
           patient_id: string
         }
         Insert: {
-          appointment_id: string
+          appointment_id?: string | null
           created_at?: string
           doctor_id: string
           id?: string
           patient_id: string
         }
         Update: {
-          appointment_id?: string
+          appointment_id?: string | null
           created_at?: string
           doctor_id?: string
           id?: string

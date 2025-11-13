@@ -12,6 +12,7 @@ import BookAppointmentDialog from './BookAppointmentDialog';
 import AppointmentsList from './AppointmentsList';
 import ConsultationsList from './ConsultationsList';
 import NotificationsList from './NotificationsList';
+import GeneralPhysicianChat from './GeneralPhysicianChat';
 
 interface PatientDashboardProps {
   user: User;
@@ -66,8 +67,11 @@ const PatientDashboard = ({ user }: PatientDashboardProps) => {
       </nav>
 
       <div className="container mx-auto px-6 py-10">
-        <div className="mb-8">
-          <BookAppointmentDialog userId={user.id} onAppointmentBooked={handleAppointmentBooked} />
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+          <div className="lg:col-span-2">
+            <BookAppointmentDialog userId={user.id} onAppointmentBooked={handleAppointmentBooked} />
+          </div>
+          <GeneralPhysicianChat patientId={user.id} />
         </div>
 
         <Tabs defaultValue="appointments" className="space-y-6">
