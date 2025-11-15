@@ -5,6 +5,7 @@ import { MessageSquare } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import ChatInterface from './ChatInterface';
+import { VideoCall } from '@/components/video/VideoCall';
 
 interface ChatDialogProps {
   appointmentId?: string;
@@ -27,6 +28,7 @@ const ChatDialog = ({
 }: ChatDialogProps) => {
   const [open, setOpen] = useState(false);
   const [chatRoomId, setChatRoomId] = useState<string | null>(null);
+  const [isVideoCallActive, setIsVideoCallActive] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -80,29 +82,50 @@ const ChatDialog = ({
     setChatRoomId(data.id);
   };
 
+  const handleStartVideoCall = () => {
+    setIsVideoCallActive(true);
+  };
+
+  const handleEndVideoCall = () => {
+    setIsVideoCallActive(false);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant={variant} size="sm">
-          <MessageSquare className="w-4 h-4 mr-2" />
-          Open Chat
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-[600px] p-0">
-        <DialogHeader className="px-6 pt-6">
-          <DialogTitle>Chat</DialogTitle>
-        </DialogHeader>
-        {chatRoomId && (
-          <ChatInterface 
-            chatRoomId={chatRoomId} 
-            currentUserId={currentUserId} 
-            otherUserName={otherUserName}
-            otherUserId={currentUserId === patientId ? doctorId : patientId}
-            onBookGeneralPhysician={onBookGeneralPhysician}
-          />
-        )}
-      </DialogContent>
-    </Dialog>
+    <>
+      {isVideoCallActive && chatRoomId && (
+        <VideoCall
+          chatRoomId={chatRoomId}
+          currentUserId={currentUserId}
+          otherUserId={currentUserId === patientId ? doctorId : patientId}
+          otherUserName={otherUserName}
+          onCallEnd={handleEndVideoCall}
+        />
+      )}
+      
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogTrigger asChild>
+          <Button variant={variant} size="sm">
+            <MessageSquare className="w-4 h-4 mr-2" />
+            Open Chat
+          </Button>
+        </DialogTrigger>
+        <DialogContent className="sm:max-w-[600px] p-0">
+          <DialogHeader className="px-6 pt-6">
+            <DialogTitle>Chat</DialogTitle>
+          </DialogHeader>
+          {chatRoomId && (
+            <ChatInterface 
+              chatRoomId={chatRoomId} 
+              currentUserId={currentUserId} 
+              otherUserName={otherUserName}
+              otherUserId={currentUserId === patientId ? doctorId : patientId}
+              onBookGeneralPhysician={onBookGeneralPhysician}
+              onStartVideoCall={handleStartVideoCall}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
   );
 };
 

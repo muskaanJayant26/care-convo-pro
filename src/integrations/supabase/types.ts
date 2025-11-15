@@ -409,6 +409,44 @@ export type Database = {
           },
         ]
       }
+      video_calls: {
+        Row: {
+          chat_room_id: string
+          created_at: string
+          ended_at: string | null
+          id: string
+          started_at: string
+          started_by: string
+          status: string
+        }
+        Insert: {
+          chat_room_id: string
+          created_at?: string
+          ended_at?: string | null
+          id?: string
+          started_at?: string
+          started_by: string
+          status?: string
+        }
+        Update: {
+          chat_room_id?: string
+          created_at?: string
+          ended_at?: string | null
+          id?: string
+          started_at?: string
+          started_by?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "video_calls_chat_room_id_fkey"
+            columns: ["chat_room_id"]
+            isOneToOne: false
+            referencedRelation: "chat_rooms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never

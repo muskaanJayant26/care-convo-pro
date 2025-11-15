@@ -3,7 +3,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Send } from 'lucide-react';
+import { Send, Video } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { format } from 'date-fns';
 
@@ -20,9 +20,10 @@ interface ChatInterfaceProps {
   otherUserName: string;
   otherUserId: string;
   onBookGeneralPhysician?: () => void;
+  onStartVideoCall?: () => void;
 }
 
-const ChatInterface = ({ chatRoomId, currentUserId, otherUserName, otherUserId, onBookGeneralPhysician }: ChatInterfaceProps) => {
+const ChatInterface = ({ chatRoomId, currentUserId, otherUserName, otherUserId, onBookGeneralPhysician, onStartVideoCall }: ChatInterfaceProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
@@ -141,8 +142,14 @@ const ChatInterface = ({ chatRoomId, currentUserId, otherUserName, otherUserId, 
 
   return (
     <div className="flex flex-col h-[500px]">
-      <div className="bg-gradient-to-r from-primary/10 to-secondary/10 p-4 border-b">
+      <div className="bg-gradient-to-r from-primary/10 to-secondary/10 p-4 border-b flex justify-between items-center">
         <h3 className="font-semibold text-foreground">Chat with {otherUserName}</h3>
+        {onStartVideoCall && (
+          <Button onClick={onStartVideoCall} size="sm" variant="secondary">
+            <Video className="w-4 h-4 mr-2" />
+            Start Video Call
+          </Button>
+        )}
       </div>
 
       <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
