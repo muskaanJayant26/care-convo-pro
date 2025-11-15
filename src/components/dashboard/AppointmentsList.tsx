@@ -4,10 +4,16 @@ import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { format } from 'date-fns';
-import { CheckCircle2, XCircle, Calendar, User } from 'lucide-react';
+import { CheckCircle2, XCircle, Calendar, User, DollarSign } from 'lucide-react';
 import AddConsultationDialog from './AddConsultationDialog';
 import ChatDialog from '../chat/ChatDialog';
 import { useNavigate } from 'react-router-dom';
+
+interface Payment {
+  id: string;
+  amount: number;
+  status: string;
+}
 
 interface Appointment {
   id: string;
@@ -18,6 +24,7 @@ interface Appointment {
   doctor_id: string;
   patient: { full_name: string };
   doctor: { full_name: string };
+  payments?: Payment[];
 }
 
 interface AppointmentsListProps {
@@ -42,7 +49,8 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
         patient_id,
         doctor_id,
         patient:profiles!appointments_patient_id_fkey(full_name),
-        doctor:profiles!appointments_doctor_id_fkey(full_name)
+        doctor:profiles!appointments_doctor_id_fkey(full_name),
+        payments(id, amount, status)
       `)
       .order('appointment_date', { ascending: false });
 
@@ -144,6 +152,19 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
     }
   };
 
+  const handleSendPaymentRequest = async (appointmentId: string, patientId: string, amount: number) => {
+    await supabase.from('notifications').insert({
+      user_id: patientId,
+      title: 'Payment Request',
+      message: `Your doctor has requested a payment of $${amount.toFixed(2)} for your appointment. Please complete the payment.`,
+    });
+
+    toast({
+      title: 'Success',
+      description: 'Payment request sent to patient',
+    });
+  };
+
   const getStatusBadge = (status: string) => {
     const variants: Record<string, any> = {
       pending: 'secondary',
@@ -194,6 +215,16 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
 
           <p className="text-sm">{apt.reason}</p>
 
+          {apt.payments && apt.payments.length > 0 && (
+            <div className="flex items-center gap-2 text-sm">
+              <DollarSign className="w-4 h-4 text-muted-foreground" />
+              <span>Payment: ${apt.payments[0].amount.toFixed(2)}</span>
+              <Badge variant={apt.payments[0].status === 'completed' ? 'default' : 'secondary'}>
+                {apt.payments[0].status}
+              </Badge>
+            </div>
+          )}
+
           {role === 'doctor' && apt.status === 'pending' && (
             <div className="flex gap-2">
               <Button
@@ -217,7 +248,7 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
           )}
 
           {role === 'doctor' && apt.status === 'confirmed' && (
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <AddConsultationDialog appointmentId={apt.id} onConsultationAdded={fetchAppointments} />
               <ChatDialog
                 appointmentId={apt.id}
@@ -227,6 +258,16 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
                 otherUserName={apt.patient.full_name}
                 variant="outline"
               />
+              {apt.payments && apt.payments.length > 0 && apt.payments[0].status === 'pending' && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => handleSendPaymentRequest(apt.id, apt.patient_id, apt.payments![0].amount)}
+                >
+                  <DollarSign className="w-4 h-4 mr-1" />
+                  Send Payment Request
+                </Button>
+              )}
             </div>
           )}
 
