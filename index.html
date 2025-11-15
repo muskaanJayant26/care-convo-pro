@@ -19,6 +19,10 @@
 
   <body>
     <div id="root"></div>
+    <script>
+      // Polyfill for simple-peer which expects Node.js global object
+      window.global = window;
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
