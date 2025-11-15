@@ -28,6 +28,7 @@ const BookAppointmentDialog = ({ userId, onAppointmentBooked }: BookAppointmentD
   const [selectedDoctor, setSelectedDoctor] = useState('');
   const [appointmentDate, setAppointmentDate] = useState('');
   const [reason, setReason] = useState('');
+  const [amount, setAmount] = useState('');
 
   useEffect(() => {
     const fetchDoctors = async () => {
@@ -60,7 +61,7 @@ const BookAppointmentDialog = ({ userId, onAppointmentBooked }: BookAppointmentD
     e.preventDefault();
     setLoading(true);
 
-    const { error } = await supabase
+    const { data: appointmentData, error } = await supabase
       .from('appointments')
       .insert({
         patient_id: userId,
@@ -68,7 +69,9 @@ const BookAppointmentDialog = ({ userId, onAppointmentBooked }: BookAppointmentD
         appointment_date: new Date(appointmentDate).toISOString(),
         reason,
         status: 'pending',
-      });
+      })
+      .select()
+      .single();
 
     if (error) {
       toast({
@@ -76,25 +79,42 @@ const BookAppointmentDialog = ({ userId, onAppointmentBooked }: BookAppointmentD
         description: error.message,
         variant: 'destructive',
       });
-    } else {
-      // Create notification for doctor
-      await supabase.from('notifications').insert({
-        user_id: selectedDoctor,
-        title: 'New Appointment Request',
-        message: `You have a new appointment request for ${format(new Date(appointmentDate), 'PPpp')}`,
-      });
-
-      toast({
-        title: 'Success',
-        description: 'Appointment request sent successfully',
-      });
-      setOpen(false);
-      setSelectedDoctor('');
-      setAppointmentDate('');
-      setReason('');
-      onAppointmentBooked();
+      setLoading(false);
+      return;
     }
 
+    // Create payment record if amount is specified
+    if (amount && parseFloat(amount) > 0 && appointmentData) {
+      const { error: paymentError } = await supabase
+        .from('payments')
+        .insert({
+          appointment_id: appointmentData.id,
+          amount: parseFloat(amount),
+          status: 'pending',
+        });
+
+      if (paymentError) {
+        console.error('Error creating payment:', paymentError);
+      }
+    }
+
+    // Create notification for doctor
+    await supabase.from('notifications').insert({
+      user_id: selectedDoctor,
+      title: 'New Appointment Request',
+      message: `You have a new appointment request for ${format(new Date(appointmentDate), 'PPpp')}${amount ? ` with payment of $${amount}` : ''}`,
+    });
+
+    toast({
+      title: 'Success',
+      description: 'Appointment request sent successfully',
+    });
+    setOpen(false);
+    setSelectedDoctor('');
+    setAppointmentDate('');
+    setReason('');
+    setAmount('');
+    onAppointmentBooked();
     setLoading(false);
   };
 
@@ -149,6 +169,20 @@ const BookAppointmentDialog = ({ userId, onAppointmentBooked }: BookAppointmentD
               onChange={(e) => setReason(e.target.value)}
               required
               rows={4}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="amount">Payment Amount (Optional)</Label>
+            <input
+              id="amount"
+              type="number"
+              step="0.01"
+              min="0"
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              placeholder="0.00"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
             />
           </div>
 
