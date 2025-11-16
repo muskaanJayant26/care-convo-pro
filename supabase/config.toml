@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.generate-health-insights]
 verify_jwt = true
+
+[functions.send-payment-reminders]
+verify_jwt = false
