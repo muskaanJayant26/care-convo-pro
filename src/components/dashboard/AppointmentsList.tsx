@@ -165,6 +165,33 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
     });
   };
 
+  const handleMarkPaymentCompleted = async (paymentId: string, doctorId: string) => {
+    const { error } = await supabase
+      .from('payments')
+      .update({ status: 'paid' })
+      .eq('id', paymentId);
+
+    if (error) {
+      toast({
+        title: 'Error',
+        description: error.message,
+        variant: 'destructive',
+      });
+    } else {
+      await supabase.from('notifications').insert({
+        user_id: doctorId,
+        title: 'Payment Completed',
+        message: 'A patient has marked their payment as completed',
+      });
+
+      toast({
+        title: 'Success',
+        description: 'Payment marked as completed',
+      });
+      fetchAppointments();
+    }
+  };
+
   const getStatusBadge = (status: string) => {
     const variants: Record<string, any> = {
       pending: 'secondary',
@@ -272,14 +299,26 @@ const AppointmentsList = ({ userId, role }: AppointmentsListProps) => {
           )}
 
           {role === 'patient' && apt.status === 'confirmed' && (
-            <ChatDialog
-              appointmentId={apt.id}
-              patientId={apt.patient_id}
-              doctorId={apt.doctor_id}
-              currentUserId={userId}
-              otherUserName={`Dr. ${apt.doctor.full_name}`}
-              onBookGeneralPhysician={() => navigate('/dashboard')}
-            />
+            <div className="flex gap-2 flex-wrap">
+              <ChatDialog
+                appointmentId={apt.id}
+                patientId={apt.patient_id}
+                doctorId={apt.doctor_id}
+                currentUserId={userId}
+                otherUserName={`Dr. ${apt.doctor.full_name}`}
+                onBookGeneralPhysician={() => navigate('/dashboard')}
+              />
+              {apt.payments && apt.payments.length > 0 && apt.payments[0].status === 'pending' && (
+                <Button
+                  size="sm"
+                  variant="default"
+                  onClick={() => handleMarkPaymentCompleted(apt.payments![0].id, apt.doctor_id)}
+                >
+                  <DollarSign className="w-4 h-4 mr-1" />
+                  Mark Payment as Completed
+                </Button>
+              )}
+            </div>
           )}
 
           {role === 'patient' && apt.status === 'pending' && (
