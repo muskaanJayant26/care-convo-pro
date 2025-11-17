@@ -42,6 +42,16 @@ export const VideoCall = ({
 
   const initializeCall = async () => {
     try {
+      // Check if we're in a secure context
+      if (!window.isSecureContext) {
+        throw new Error("Video calls require a secure connection (HTTPS)");
+      }
+
+      // Check if getUserMedia is supported
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Your browser doesn't support video calls");
+      }
+
       // Get user media
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: true,
@@ -123,9 +133,27 @@ export const VideoCall = ({
       setPeer(peerInstance);
     } catch (error) {
       console.error("Error initializing call:", error);
+      
+      let errorMessage = "Failed to access camera/microphone";
+      
+      if (error instanceof Error) {
+        // Handle specific error types
+        if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+          errorMessage = "Camera/microphone access denied. Please grant permissions and try again.";
+        } else if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
+          errorMessage = "No camera or microphone found. Please connect a device and try again.";
+        } else if (error.name === "NotReadableError" || error.name === "TrackStartError") {
+          errorMessage = "Camera/microphone is already in use by another application. Please close other apps and try again.";
+        } else if (error.message.includes("secure")) {
+          errorMessage = error.message;
+        } else if (error.message.includes("support")) {
+          errorMessage = error.message;
+        }
+      }
+      
       toast({
-        title: "Error",
-        description: "Failed to access camera/microphone",
+        title: "Video Call Error",
+        description: errorMessage,
         variant: "destructive",
       });
       onCallEnd();
