@@ -5,8 +5,8 @@ import { MessageSquare } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import ChatInterface from './ChatInterface';
-import { VideoCall } from '@/components/video/VideoCall';
-import IncomingCallPopup from '../incomingCall/incomingCallPopup';
+import VideoCall from '../video/VideoCall';
+
 
 interface ChatDialogProps {
   appointmentId?: string;
@@ -18,15 +18,17 @@ interface ChatDialogProps {
   onBookGeneralPhysician?: () => void;
 }
 
-const ChatDialog = ({
+export default function ChatDialog({
   appointmentId,
   patientId,
   doctorId,
   currentUserId,
   otherUserName,
   variant = 'default',
-  onBookGeneralPhysician,
-}: ChatDialogProps) => {
+  onBookGeneralPhysician
+}: ChatDialogProps) {
+  const { toast } = useToast();
+
   const [open, setOpen] = useState(false);
   const [chatRoomId, setChatRoomId] = useState<string | null>(null);
 
@@ -41,61 +43,10 @@ const ChatDialog = ({
   const [callOtherUserName, setCallOtherUserName] = useState<string | null>(null);
 
   const channelRef = useRef<any>(null);
-  const { toast } = useToast();
 
-  // -----------------------------
-  // Create / Load Chat Room
-  // -----------------------------
-  useEffect(() => {
-    if (open) getOrCreateChatRoom();
-  }, [open]);
-
-  const getOrCreateChatRoom = async () => {
-    const query = supabase
-      .from('chat_rooms')
-      .select('id')
-      .eq('patient_id', patientId)
-      .eq('doctor_id', doctorId);
-
-    if (appointmentId) {
-      query.eq('appointment_id', appointmentId);
-    } else {
-      query.is('appointment_id', null);
-    }
-
-    const { data: existing } = await query.single();
-
-    if (existing) {
-      setChatRoomId(existing.id);
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from('chat_rooms')
-      .insert({
-        appointment_id: appointmentId || null,
-        patient_id: patientId,
-        doctor_id: doctorId,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Error creating chat room:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to open chat',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    setChatRoomId(data.id);
-  };
-
-  // -----------------------------
-  // Subscribe to incoming calls
-  // -----------------------------
+  // -----------------------------------------------------
+  // CREATE / SUBSCRIBE TO VIDEO CALL CHANNEL ONCE
+  // -----------------------------------------------------
   useEffect(() => {
     if (!chatRoomId) return;
 
@@ -106,109 +57,115 @@ const ChatDialog = ({
     channelRef.current = channel;
 
     channel.subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        console.log('Subscribed to video_call channel:', chatRoomId);
+      if (status === "SUBSCRIBED") {
+        console.log("ChatDialog subscribed to call channel");
       }
     });
 
-    // Incoming call event
-    channel.on('broadcast', { event: 'incoming_call' }, ({ payload }) => {
+    // incoming call listener
+    channel.on("broadcast", { event: "incoming_call" }, ({ payload }) => {
       if (payload.from === currentUserId) return;
 
       setIncomingCall({
         callerId: payload.from,
-        callerName: payload.fromName || 'Caller',
-        callId: payload.callId,
+        callerName: payload.fromName,
+        callId: payload.callId
       });
-    });
-
-    // Caller was rejected
-    channel.on('broadcast', { event: 'call_rejected' }, ({ payload }) => {
-      if (payload.to === currentUserId) {
-        toast({
-          title: 'Call Rejected',
-          description: `${otherUserName} rejected your call.`,
-        });
-      }
     });
 
     return () => {
       supabase.removeChannel(channel);
+      channelRef.current = null;
     };
   }, [chatRoomId]);
 
-  // -----------------------------
-  // Start outgoing video call
-  // -----------------------------
-  const handleStartVideoCall = async () => {
-    if (!chatRoomId) return;
+  // ------------------------------------------------------------------
+  // OPEN CHAT = GET/CREATE CHAT ROOM
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (open) {
+      getOrCreateChatRoom();
+    }
+  }, [open]);
 
-    const callId = crypto.randomUUID();
+  async function getOrCreateChatRoom() {
+    const query = supabase
+      .from("chat_rooms")
+      .select("id")
+      .eq("patient_id", patientId)
+      .eq("doctor_id", doctorId);
 
-    channelRef.current?.send({
-      type: 'broadcast',
-      event: 'incoming_call',
-      payload: {
-        from: currentUserId,
-        fromName: otherUserName,
-        callId,
-      },
-    });
+    appointmentId ? query.eq("appointment_id", appointmentId) : query.is("appointment_id", null);
 
-    // open video UI immediately
+    const { data: existing } = await query.single();
+
+    if (existing) {
+      setChatRoomId(existing.id);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("chat_rooms")
+      .insert({
+        appointment_id: appointmentId || null,
+        patient_id: patientId,
+        doctor_id: doctorId,
+      })
+      .select()
+      .single();
+
+    if (!error) setChatRoomId(data.id);
+  }
+
+  // ------------------------------------------------------------------
+  // ACCEPT / REJECT
+  // ------------------------------------------------------------------
+  const handleAccept = () => {
     setInCall(true);
-    setCallOtherUserId(currentUserId === patientId ? doctorId : patientId);
-    setCallOtherUserName(otherUserName);
+    setCallOtherUserId(incomingCall!.callerId);
+    setCallOtherUserName(incomingCall!.callerName);
+    setIncomingCall(null);
   };
 
-  // -----------------------------
-  // End the call
-  // -----------------------------
-  const handleEndVideoCall = () => {
-    setInCall(false);
-    setCallOtherUserId(null);
-    setCallOtherUserName(null);
+  const handleReject = () => {
+    if (channelRef.current) {
+      channelRef.current.send({
+        type: "broadcast",
+        event: "call_rejected",
+        payload: {
+          from: currentUserId,
+          callId: incomingCall?.callId,
+        },
+      });
+    }
+    setIncomingCall(null);
   };
 
+  // ------------------------------------------------------------------
   return (
     <>
-      {/* Incoming Call Popup */}
       {incomingCall && !inCall && (
         <IncomingCallPopup
           callerName={incomingCall.callerName}
-          onAccept={() => {
-            setInCall(true);
-            setCallOtherUserId(incomingCall.callerId);
-            setCallOtherUserName(incomingCall.callerName);
-            setIncomingCall(null);
-          }}
-          onReject={() => {
-            channelRef.current?.send({
-              type: 'broadcast',
-              event: 'call_rejected',
-              payload: {
-                from: currentUserId,
-                to: incomingCall.callerId,
-                callId: incomingCall.callId,
-              },
-            });
-            setIncomingCall(null);
-          }}
+          onAccept={handleAccept}
+          onReject={handleReject}
         />
       )}
 
-      {/* Video Call */}
-      {inCall && callOtherUserId && callOtherUserName && chatRoomId && (
+      {inCall && callOtherUserId && callOtherUserName && (
         <VideoCall
-          chatRoomId={chatRoomId}
+          chatRoomId={chatRoomId!}
           currentUserId={currentUserId}
           otherUserId={callOtherUserId}
           otherUserName={callOtherUserName}
-          onCallEnd={handleEndVideoCall}
+          onCallEnd={() => {
+            setInCall(false);
+            setCallOtherUserId(null);
+            setCallOtherUserName(null);
+          }}
         />
       )}
 
-      {/* Chat Dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger asChild>
           <Button variant={variant} size="sm">
@@ -229,13 +186,10 @@ const ChatDialog = ({
               otherUserName={otherUserName}
               otherUserId={currentUserId === patientId ? doctorId : patientId}
               onBookGeneralPhysician={onBookGeneralPhysician}
-              onStartVideoCall={handleStartVideoCall}
             />
           )}
         </DialogContent>
       </Dialog>
     </>
   );
-};
-
-export default ChatDialog;
+}
