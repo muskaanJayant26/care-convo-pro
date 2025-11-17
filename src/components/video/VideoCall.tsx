@@ -12,6 +12,16 @@ interface VideoCallProps {
   otherUserId: string;
   otherUserName: string;
   onCallEnd: () => void;
+  /**
+   * If you already created a call row and broadcasted `incoming_call`,
+   * pass that call id here so VideoCall won't create a duplicate DB row.
+   */
+  externalCallId?: string | null;
+  /**
+   * If true, this client is the initiator of the WebRTC offer.
+   * If omitted, we use a deterministic ordering based on user ids.
+   */
+  isInitiator?: boolean;
 }
 
 export const VideoCall = ({
@@ -20,26 +30,49 @@ export const VideoCall = ({
   otherUserId,
   otherUserName,
   onCallEnd,
+  externalCallId = null,
+  isInitiator,
 }: VideoCallProps) => {
   const { toast } = useToast();
 
   const peerRef = useRef<SimplePeer.Instance | null>(null);
   const channelRef = useRef<any>(null);
   const pendingSignals = useRef<any[]>([]);
+  const sendQueue = useRef<any[]>([]); // queue signals to send until channel.ready
 
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
 
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
-  const [callId, setCallId] = useState<string | null>(null);
+  const [callId, setCallId] = useState<string | null>(externalCallId);
 
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  // helper to send via channel or queue
+  const safeSend = (payload: any) => {
+    try {
+      const ch = channelRef.current;
+      if (ch && typeof ch.send === "function") {
+        ch.send({
+          type: "broadcast",
+          ...payload,
+        });
+      } else {
+        // queue to send later
+        sendQueue.current.push(payload);
+      }
+    } catch (e) {
+      console.warn("Failed to send via channel (queued):", e);
+      sendQueue.current.push(payload);
+    }
+  };
 
   useEffect(() => {
     initializeCall();
     return cleanup;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // -------------------------------------------------------------
@@ -48,7 +81,7 @@ export const VideoCall = ({
   const initializeCall = async () => {
     try {
       if (!window.isSecureContext)
-        throw new Error("Video calls require HTTPS");
+        throw new Error("Video calls require HTTPS or localhost");
 
       // -----------------------------
       // Get local video/audio stream
@@ -59,97 +92,152 @@ export const VideoCall = ({
       });
 
       setStream(mediaStream);
-      if (localVideoRef.current)
-        localVideoRef.current.srcObject = mediaStream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = mediaStream;
 
       // -----------------------------
-      // Create or update DB record
+      // Create DB record for call (only when externalCallId NOT provided)
       // -----------------------------
-      const { data: callData, error: callError } = await supabase
-        .from("video_calls")
-        .insert({
-          chat_room_id: chatRoomId,
-          started_by: currentUserId,
-          status: "pending",
-        })
-        .select()
-        .single();
+      let createdCallId = externalCallId;
+      if (!externalCallId) {
+        const { data: callData, error: callError } = await supabase
+          .from("video_calls")
+          .insert({
+            chat_room_id: chatRoomId,
+            started_by: currentUserId,
+            status: "pending",
+          })
+          .select()
+          .single();
 
-      if (callError) throw callError;
-
-      setCallId(callData.id);
+        if (callError) {
+          console.warn("Failed to create video_calls row:", callError);
+          // not fatal for signaling, continue (but show toast)
+          toast({
+            title: "Call record error",
+            description: "Failed to create call record (non-fatal).",
+            variant: "destructive",
+          });
+        } else {
+          createdCallId = callData?.id ?? null;
+        }
+      }
+      setCallId(createdCallId ?? null);
 
       // -----------------------------
-      // Subscribe to Supabase channel
+      // Create & subscribe to channel
       // -----------------------------
       const channel = supabase.channel(`video_call_${chatRoomId}`, {
         config: { broadcast: { ack: true } },
       });
 
+      // register handlers BEFORE subscribe to avoid missing events
+      channel.on(
+        "broadcast",
+        { event: "signal" },
+        ({ payload }: { payload: any }) => {
+          // ignore messages from ourselves
+          if (!payload) return;
+          if (payload.from === currentUserId) return;
+
+          if (peerRef.current) {
+            try {
+              peerRef.current.signal(payload.signal);
+            } catch (err) {
+              console.warn("Error applying remote signal:", err);
+            }
+          } else {
+            pendingSignals.current.push(payload.signal);
+          }
+        }
+      );
+
+      channel.on("broadcast", { event: "call_rejected" }, ({ payload }: any) => {
+        // If a callId exists and it doesn't match, ignore
+        if (payload) {
+          if (payload.callId && callId && payload.callId !== callId) return;
+          // if caller got rejected, notify and end
+          if (payload.to === currentUserId || payload.from === currentUserId || !payload.to) {
+            toast({
+              title: "Call Rejected",
+              description: "The other user declined the call.",
+              variant: "destructive",
+            });
+            cleanup();
+            onCallEnd();
+          }
+        }
+      });
+
       channelRef.current = channel;
 
-      channel.subscribe(async (status: string) => {
-        if (status === "SUBSCRIBED") {
-          console.log("Realtime channel subscribed.");
+      // Now subscribe (no await)
+      channel.subscribe((status: string) => {
+        if (status !== "SUBSCRIBED") return;
 
-          /** -------------------------------
-           *  Create peer ONLY after subscribe
-           * --------------------------------
-           */
-          const isInitiator = currentUserId < otherUserId;
+        console.log("Realtime channel subscribed for video:", chatRoomId);
 
-          const peer = new SimplePeer({
-            initiator: isInitiator,
-            trickle: true,
-            stream: mediaStream,
-          });
-
-          peerRef.current = peer;
-
-          // Send offers / answers / ICE
-          peer.on("signal", (signal) => {
+        // flush any queued outgoing messages (like incoming_call or signals)
+        while (sendQueue.current.length > 0) {
+          const payload = sendQueue.current.shift();
+          try {
             channel.send({
               type: "broadcast",
-              event: "signal",
-              payload: {
-                signal,
-                from: currentUserId,
-              },
+              ...payload,
             });
-          });
-
-          // On receiving remote stream
-          peer.on("stream", (remote) => {
-            setRemoteStream(remote);
-            if (remoteVideoRef.current)
-              remoteVideoRef.current.srcObject = remote;
-
-            if (callId) {
-              supabase
-                .from("video_calls")
-                .update({ status: "active" })
-                .eq("id", callId);
-            }
-          });
-
-          // Process queued signals
-          pendingSignals.current.forEach((sig) => peer.signal(sig));
-          pendingSignals.current = [];
+          } catch (e) {
+            console.warn("Failed flushing queued send:", e);
+          }
         }
+
+        // Create peer after subscription
+        const isInit =
+          typeof isInitiator === "boolean"
+            ? isInitiator
+            : currentUserId < otherUserId;
+
+        const peer = new SimplePeer({
+          initiator: isInit,
+          trickle: true,
+          stream: mediaStream,
+        });
+
+        peerRef.current = peer;
+
+        // outgoing signals -> send via supabase channel (or queue)
+        peer.on("signal", (signal) => {
+          safeSend({
+            event: "signal",
+            payload: { signal, from: currentUserId },
+          });
+        });
+
+        peer.on("stream", (remote) => {
+          setRemoteStream(remote);
+          if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remote;
+
+          // mark DB as active if we have a callId
+          if (createdCallId) {
+            supabase.from("video_calls").update({ status: "active" }).eq("id", createdCallId);
+          }
+        });
+
+        peer.on("error", (err) => {
+          console.error("Peer error:", err);
+        });
+
+        // process pending signals that arrived while we were creating peer
+        pendingSignals.current.forEach((sig) => {
+          try {
+            peer.signal(sig);
+          } catch (e) {
+            console.warn("Failed to process queued signal:", e);
+          }
+        });
+        pendingSignals.current = [];
       });
 
-      // -----------------------------
-      // Incoming signaling handler
-      // -----------------------------
-      channel.on("broadcast", { event: "signal" }, ({ payload }) => {
-        if (payload.from === currentUserId) return;
-
-        if (peerRef.current) {
-          peerRef.current.signal(payload.signal);
-        } else {
-          pendingSignals.current.push(payload.signal);
-        }
-      });
+      // NOTE: VideoCall does NOT broadcast incoming_call here.
+      // The chat UI / caller should broadcast incoming_call prior to opening VideoCall.
     } catch (err: any) {
       console.error("Error initializing call:", err);
 
@@ -167,22 +255,53 @@ export const VideoCall = ({
   //  CLEANUP
   // -------------------------------------------------------------
   const cleanup = () => {
-    if (peerRef.current) peerRef.current.destroy();
+    try {
+      if (peerRef.current) {
+        peerRef.current.removeAllListeners?.();
+        try {
+          peerRef.current.destroy();
+        } catch (e) {
+          // ignore
+        }
+        peerRef.current = null;
+      }
+    } catch (e) {
+      // ignore
+    }
 
-    if (stream)
-      stream.getTracks().forEach((t) => t.stop());
+    if (stream) {
+      try {
+        stream.getTracks().forEach((t) => t.stop());
+      } catch (e) {
+        // ignore
+      }
+      setStream(null);
+    }
 
-    if (channelRef.current)
-      supabase.removeChannel(channelRef.current);
+    if (channelRef.current) {
+      try {
+        supabase.removeChannel(channelRef.current);
+      } catch (e) {
+        // ignore
+      }
+      channelRef.current = null;
+    }
 
     if (callId) {
+      // Update DB status to ended (best-effort)
       supabase
         .from("video_calls")
         .update({
           status: "ended",
           ended_at: new Date().toISOString(),
         })
-        .eq("id", callId);
+        .eq("id", callId)
+        .then(() => {
+          setCallId(null);
+        })
+        .catch(() => {
+          setCallId(null);
+        });
     }
   };
 
@@ -190,7 +309,6 @@ export const VideoCall = ({
     if (!stream) return;
     const track = stream.getVideoTracks()[0];
     if (!track) return;
-
     track.enabled = !track.enabled;
     setIsVideoEnabled(track.enabled);
   };
@@ -199,25 +317,20 @@ export const VideoCall = ({
     if (!stream) return;
     const track = stream.getAudioTracks()[0];
     if (!track) return;
-
     track.enabled = !track.enabled;
     setIsAudioEnabled(track.enabled);
   };
 
   const endCall = () => {
+    // notify remote optionally (best-effort): we could broadcast call_ended if needed
     cleanup();
     onCallEnd();
   };
 
-  // -------------------------------------------------------------
-  //  UI
-  // -------------------------------------------------------------
   return (
     <div className="fixed inset-0 z-50 bg-background/95 backdrop-blur-sm flex items-center justify-center p-4">
       <Card className="w-full max-w-6xl p-6 space-y-4">
-        <h2 className="text-2xl font-semibold">
-          Video Call with {otherUserName}
-        </h2>
+        <h2 className="text-2xl font-semibold">Video Call with {otherUserName}</h2>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* REMOTE VIDEO */}
@@ -230,9 +343,7 @@ export const VideoCall = ({
             />
             {!remoteStream && (
               <div className="absolute inset-0 flex items-center justify-center">
-                <p className="text-muted-foreground">
-                  Waiting for {otherUserName}...
-                </p>
+                <p className="text-muted-foreground">Waiting for {otherUserName}...</p>
               </div>
             )}
           </div>
@@ -246,16 +357,12 @@ export const VideoCall = ({
               muted
               className="w-full h-full object-cover"
             />
-
             {!isVideoEnabled && (
               <div className="absolute inset-0 flex items-center justify-center bg-muted">
                 <VideoOff className="w-12 h-12 text-muted-foreground" />
               </div>
             )}
-
-            <div className="absolute bottom-2 left-2 bg-background/80 px-2 py-1 rounded text-sm">
-              You
-            </div>
+            <div className="absolute bottom-2 left-2 bg-background/80 px-2 py-1 rounded text-sm">You</div>
           </div>
         </div>
 
@@ -292,3 +399,5 @@ export const VideoCall = ({
     </div>
   );
 };
+
+export default VideoCall;

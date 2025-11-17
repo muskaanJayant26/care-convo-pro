@@ -7,6 +7,7 @@ import { Send, Video } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { format } from 'date-fns';
 
+
 interface Message {
   id: string;
   sender_id: string;
