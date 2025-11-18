@@ -1,12 +1,12 @@
-// ChatDialog.tsx - Clean Daily Version
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { MessageSquare, Video } from 'lucide-react';
+import { MessageSquare } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import ChatInterface from './ChatInterface';
 import VideoCall from '../video/VideoCall';
+
 
 interface ChatDialogProps {
   appointmentId?: string;
@@ -27,20 +27,61 @@ export default function ChatDialog({
   variant = 'default',
   onBookGeneralPhysician
 }: ChatDialogProps) {
-  
   const { toast } = useToast();
 
   const [open, setOpen] = useState(false);
   const [chatRoomId, setChatRoomId] = useState<string | null>(null);
 
-  // Show the video call modal
-  const [showCall, setShowCall] = useState(false);
+  const [incomingCall, setIncomingCall] = useState<null | {
+    callerId: string;
+    callerName: string;
+    callId: string;
+  }>(null);
 
-  const DAILY_ROOM_URL = "https://health-test.daily.co/test";
+  const [inCall, setInCall] = useState(false);
+  const [callOtherUserId, setCallOtherUserId] = useState<string | null>(null);
+  const [callOtherUserName, setCallOtherUserName] = useState<string | null>(null);
+
+  const channelRef = useRef<any>(null);
 
   // -----------------------------------------------------
-  // CREATE / GET CHAT ROOM
+  // CREATE / SUBSCRIBE TO VIDEO CALL CHANNEL ONCE
   // -----------------------------------------------------
+  useEffect(() => {
+    if (!chatRoomId) return;
+
+    const channel = supabase.channel(`video_call_${chatRoomId}`, {
+      config: { broadcast: { ack: true } },
+    });
+
+    channelRef.current = channel;
+
+    channel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        console.log("ChatDialog subscribed to call channel");
+      }
+    });
+
+    // incoming call listener
+    channel.on("broadcast", { event: "incoming_call" }, ({ payload }) => {
+      if (payload.from === currentUserId) return;
+
+      setIncomingCall({
+        callerId: payload.from,
+        callerName: payload.fromName,
+        callId: payload.callId
+      });
+    });
+
+    return () => {
+      supabase.removeChannel(channel);
+      channelRef.current = null;
+    };
+  }, [chatRoomId]);
+
+  // ------------------------------------------------------------------
+  // OPEN CHAT = GET/CREATE CHAT ROOM
+  // ------------------------------------------------------------------
   useEffect(() => {
     if (open) {
       getOrCreateChatRoom();
@@ -54,9 +95,7 @@ export default function ChatDialog({
       .eq("patient_id", patientId)
       .eq("doctor_id", doctorId);
 
-    appointmentId
-      ? query.eq("appointment_id", appointmentId)
-      : query.is("appointment_id", null);
+    appointmentId ? query.eq("appointment_id", appointmentId) : query.is("appointment_id", null);
 
     const { data: existing } = await query.single();
 
@@ -78,21 +117,53 @@ export default function ChatDialog({
     if (!error) setChatRoomId(data.id);
   }
 
-  // -----------------------------------------------------
-  // RENDER
-  // -----------------------------------------------------
+  // ------------------------------------------------------------------
+  // ACCEPT / REJECT
+  // ------------------------------------------------------------------
+  const handleAccept = () => {
+    setInCall(true);
+    setCallOtherUserId(incomingCall!.callerId);
+    setCallOtherUserName(incomingCall!.callerName);
+    setIncomingCall(null);
+  };
+
+  const handleReject = () => {
+    if (channelRef.current) {
+      channelRef.current.send({
+        type: "broadcast",
+        event: "call_rejected",
+        payload: {
+          from: currentUserId,
+          callId: incomingCall?.callId,
+        },
+      });
+    }
+    setIncomingCall(null);
+  };
+
+  // ------------------------------------------------------------------
   return (
     <>
-      {/* Daily video call modal */}
-      {showCall && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="w-full max-w-4xl h-[90vh] bg-white rounded-lg overflow-hidden">
-            <VideoCall
-              roomUrl={DAILY_ROOM_URL}
-              onLeave={() => setShowCall(false)}
-            />
-          </div>
-        </div>
+      {incomingCall && !inCall && (
+        <IncomingCallPopup
+          callerName={incomingCall.callerName}
+          onAccept={handleAccept}
+          onReject={handleReject}
+        />
+      )}
+
+      {inCall && callOtherUserId && callOtherUserName && (
+        <VideoCall
+          chatRoomId={chatRoomId!}
+          currentUserId={currentUserId}
+          otherUserId={callOtherUserId}
+          otherUserName={callOtherUserName}
+          onCallEnd={() => {
+            setInCall(false);
+            setCallOtherUserId(null);
+            setCallOtherUserName(null);
+          }}
+        />
       )}
 
       <Dialog open={open} onOpenChange={setOpen}>
@@ -104,17 +175,8 @@ export default function ChatDialog({
         </DialogTrigger>
 
         <DialogContent className="sm:max-w-[600px] p-0">
-          <DialogHeader className="px-6 pt-6 flex justify-between items-center">
+          <DialogHeader className="px-6 pt-6">
             <DialogTitle>Chat</DialogTitle>
-
-            {/* Open video call button */}
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => setShowCall(true)}
-            >
-              <Video className="w-4 h-4 mr-1" /> Video Call
-            </Button>
           </DialogHeader>
 
           {chatRoomId && (

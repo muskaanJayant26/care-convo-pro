@@ -1,102 +1,391 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  DailyProvider,
-  useDaily,
-  useDailyEvent,
-  DailyIframe,
-  DailyProviderProps,
-} from "@daily-co/daily-react";
+import React, { useEffect, useRef, useState } from "react";
+import SimplePeer from "simple-peer/simplepeer.min.js";
+import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { PhoneOff, Mic, MicOff, Video as VideoIcon, VideoOff, RefreshCw, ScreenShare, StopCircle } from "lucide-react";
+import {
+  PhoneOff,
+  Mic,
+  MicOff,
+  Video as VideoIcon,
+  VideoOff,
+  RefreshCw,
+} from "lucide-react";
+
+const log = {
+  info: (...m: any[]) => console.log("%c[RTC]", "color:#4ade80;font-weight:bold;", ...m),
+  warn: (...m: any[]) => console.warn("%c[RTC]", "color:#facc15;font-weight:bold;", ...m),
+  error: (...m: any[]) => console.error("%c[RTC]", "color:#ef4444;font-weight:bold;", ...m),
+};
+
+localStorage.debug = "simple-peer*";
 
 interface VideoCallProps {
-  roomUrl: string; // e.g. https://health-test.daily.co/test
-  onLeave?: () => void;
+  chatRoomId: string;
+  callerId: string; // original caller's id
+  receiverId: string; // original receiver's id
+  currentUserId: string; // currently authenticated user id
+  onClose: () => void;
 }
 
-// Small helper component that renders local + remote videos and controls
-const CallUI: React.FC<{ onLeave?: () => void }> = ({ onLeave }) => {
-  const daily = useDaily();
+const POLL_INTERVAL_MS = 2000;
+const POLL_MAX_ATTEMPTS = 12;
+
+const VideoCall: React.FC<VideoCallProps> = ({
+  chatRoomId,
+  callerId,
+  receiverId,
+  currentUserId,
+  onClose,
+}) => {
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const peerRef = useRef<SimplePeer.Instance | null>(null);
+
+  const pollIntervalRef = useRef<number | null>(null);
+  const pollAttemptsRef = useRef(0);
+
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+
   const [muted, setMuted] = useState(false);
-  const [videoOff, setVideoOff] = useState(false);
-  const [screenSharing, setScreenSharing] = useState(false);
-  const [participants, setParticipants] = useState<Record<string, any>>({});
+  const [cameraOn, setCameraOn] = useState(true);
+  const [status, setStatus] = useState<"connecting" | "connected" | "idle" | "error">("idle");
 
-  // update participants whenever Daily reports changes
-  useDailyEvent("participant-joined", () => setParticipants({ ...daily?.participants() }));
-  useDailyEvent("participant-updated", () => setParticipants({ ...daily?.participants() }));
-  useDailyEvent("participant-left", () => setParticipants({ ...daily?.participants() }));
+  const [callDuration, setCallDuration] = useState(0);
+  const timerRef = useRef<number | null>(null);
 
-  useDailyEvent("left-meeting", () => {
-    onLeave?.();
-  });
+  const isCaller = currentUserId === callerId;
+  const isReceiver = currentUserId === receiverId;
 
+  // ------------------ CAMERA ---------------------
+  const startLocalCamera = async () => {
+    log.info("🎥 Requesting user media...");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+
+      setLocalStream(stream);
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.onloadedmetadata = () =>
+          localVideoRef.current?.play().catch(() => { });
+      }
+
+      log.info("🎥 Local camera ready");
+      return stream;
+    } catch (e) {
+      log.error("❌ getUserMedia failed", e);
+      setStatus("error");
+      throw e;
+    }
+  };
+
+  // ------------------ TIMER ---------------------
+  const startTimer = () => {
+    if (timerRef.current) return;
+    timerRef.current = window.setInterval(() => setCallDuration((c) => c + 1), 1000);
+  };
+
+  const stopTimer = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = null;
+  };
+
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60).toString().padStart(2, "0");
+    const sec = (s % 60).toString().padStart(2, "0");
+    return `${m}:${sec}`;
+  };
+
+  // ------------------ HELPERS -------------------
+  const dbInsertSignal = async (signalObj: any) => {
+    const insertRow = {
+      chat_room_id: chatRoomId,
+      caller_id: callerId,
+      receiver_id: receiverId,
+      type: "webrtc-signal",
+      signal: signalObj,
+      sender_id: currentUserId,
+    };
+
+    try {
+      const { data, error } = await supabase
+        .from("call_signals")
+        .insert([insertRow])
+        .select();
+
+      if (error) {
+        log.error("❌ supabase insert error:", error);
+        return null;
+      }
+
+      log.info("📨 Signal inserted (db returned):", data);
+      return data?.[0] ?? null;
+    } catch (e) {
+      log.error("❌ Failed to insert signal", e);
+      return null;
+    }
+  };
+
+  // ------------------ PEER ---------------------
+  const createPeer = (initiator: boolean, stream: MediaStream) => {
+    if (peerRef.current) {
+      log.warn("⚠️ Peer already exists; reusing existing instance.");
+      return peerRef.current;
+    }
+
+    log.info("🛠 Creating peer", { initiator }, initiator ? "(CALLER)" : "(RECEIVER)");
+    setStatus("connecting");
+
+    const ICE_SERVERS = [
+      { urls: "stun:stun.l.google.com:19302" },
+      {
+        urls: "turn:openrelay.metered.ca:443",
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      },
+      {
+        urls: "turn:relay1.expressturn.com:3478",
+        username: "efBnwpMNpiPqfMp1eG",
+        credential: "lo1Q2M28tQerNmuT",
+      },
+    ];
+
+    const p = new SimplePeer({
+      initiator,
+      trickle: false,
+      stream,
+      config: { iceServers: ICE_SERVERS },
+    });
+
+    // Debug ICE state
+    try {
+      (p as any).on?.("iceStateChange", (state: any) => log.info("❄ ICE State:", state));
+      (p as any)._pc &&
+        ((p as any)._pc.oniceconnectionstatechange = () =>
+          log.info("🔥 native ICE conn state:", (p as any)._pc.iceConnectionState));
+    } catch (e) { }
+
+    // Signal event
+    p.on("signal", async (data: any) => {
+      log.info(initiator ? "📡 CALLER SENDING OFFER" : "📡 RECEIVER SENDING ANSWER", {
+        type: data?.type ?? "unknown",
+      });
+      await dbInsertSignal(data);
+    });
+
+    // Remote stream
+    p.on("stream", (remote: MediaStream) => {
+      log.info("🎥 Remote stream received");
+      setRemoteStream(remote);
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remote;
+        remoteVideoRef.current.onloadedmetadata = () =>
+          remoteVideoRef.current?.play().catch(() => { });
+      }
+    });
+
+    p.on("connect", () => {
+      log.info("🔗 WebRTC fully connected");
+      setStatus("connected");
+      startTimer();
+      setTimeout(() => {
+        if (remoteVideoRef.current && remoteStream) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.play().catch(() => { });
+        }
+      }, 300);
+    });
+
+    p.on("close", () => {
+      log.warn("🔚 Peer connection closed");
+      setStatus("idle");
+      stopTimer();
+    });
+
+    p.on("error", (err: any) => {
+      log.error("❌ Peer error", err);
+      setStatus("error");
+    });
+
+    peerRef.current = p;
+    return p;
+  };
+
+  // ------------------ POLLING ---------------------
+  const startPollForSignalType = (wantedSignalType: "offer" | "answer", stream: MediaStream) => {
+    if (pollIntervalRef.current) return;
+    pollAttemptsRef.current = 0;
+
+    log.info("🔁 Starting polling fallback for", wantedSignalType);
+
+    pollIntervalRef.current = window.setInterval(async () => {
+      pollAttemptsRef.current++;
+      log.info("🔎 Poll attempt", pollAttemptsRef.current);
+
+      try {
+        const { data: rows, error } = await supabase
+          .from("call_signals")
+          .select("*")
+          .eq("chat_room_id", chatRoomId)
+          .filter("signal->>type", "eq", wantedSignalType)
+          .order("created_at", { ascending: false })
+          .limit(5);
+
+        if (error) log.error("❌ Poll supabase error:", error);
+        if (rows?.length) {
+          for (const r of rows) {
+            log.info("🔎 Inspect row:", r.id, r.signal?.type);
+            if (r.signal && r.signal.type === wantedSignalType) {
+              log.info(`📩 Found ${wantedSignalType.toUpperCase()} in DB via polling`);
+              if (!peerRef.current) createPeer(wantedSignalType === "offer" ? false : true, stream);
+              try {
+                peerRef.current?.signal(r.signal);
+                log.info("📡 Applied polled signal to peer");
+              } catch (e) {
+                log.error("❌ Failed applying polled signal", e);
+              }
+              stopPollForOffers();
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        log.error("❌ Exception while polling:", e);
+      }
+
+      if (pollAttemptsRef.current >= POLL_MAX_ATTEMPTS) stopPollForOffers();
+    }, POLL_INTERVAL_MS);
+  };
+
+  const stopPollForOffers = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+      log.info("🔁 Polling stopped");
+    }
+  };
+
+  // ------------------ SETUP ---------------------
   useEffect(() => {
-    // initialize participants state on mount
-    setParticipants({ ...daily?.participants() });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let signalChannel: any = null;
+
+    const setup = async () => {
+      log.info("🚀 Setting up WebRTC (full flow)");
+      const stream = await startLocalCamera();
+
+      if (isCaller) createPeer(true, stream);
+
+      try {
+        signalChannel = supabase
+          .channel(`rtc-${chatRoomId}-${currentUserId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "INSERT",
+              schema: "public",
+              table: "call_signals",
+              filter: `chat_room_id=eq.${chatRoomId}&receiver_id=eq.${currentUserId}`,
+            },
+            async (payload: any) => {
+              const row = payload.new;
+              if (!row?.signal) return;
+
+              const signalObj = row.signal;
+              if (signalObj.type === "offer" && isReceiver) {
+                if (!peerRef.current) createPeer(false, stream);
+                peerRef.current?.signal(signalObj);
+                stopPollForOffers();
+                return;
+              }
+
+              if (signalObj.type === "answer" && isCaller) {
+                peerRef.current?.signal(signalObj);
+                stopPollForOffers();
+                return;
+              }
+
+              peerRef.current?.signal(signalObj);
+            }
+          )
+          .subscribe();
+
+        if (isReceiver) setTimeout(() => !peerRef.current && startPollForSignalType("offer", stream), 1500);
+        if (isCaller) setTimeout(() => !peerRef.current && startPollForSignalType("answer", stream), 1500);
+      } catch (e) {
+        log.error("❌ subscription error:", e);
+        if (isReceiver) startPollForSignalType("offer", stream);
+        if (isCaller) startPollForSignalType("answer", stream);
+      }
+    };
+
+    setup().catch((e) => log.error("❌ Setup failed:", e));
+
+    return () => {
+      peerRef.current?.destroy();
+      stopTimer();
+      stopPollForOffers();
+      if (signalChannel) supabase.removeChannel(signalChannel);
+      localVideoRef.current?.srcObject &&
+        (localVideoRef.current.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
+    };
   }, []);
 
-  const toggleMute = useCallback(async () => {
-    const newMuted = !muted;
-    await daily?.setLocalAudio(!newMuted);
-    setMuted(newMuted);
-  }, [daily, muted]);
+  // ------------------ UI CONTROLS ---------------------
+  const toggleMute = () => {
+    const s = localVideoRef.current?.srcObject as MediaStream | null;
+    if (s) s.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
+    setMuted((m) => !m);
+  };
 
-  const toggleCamera = useCallback(async () => {
-    const turnOff = !videoOff;
-    await daily?.setLocalVideo(!turnOff);
-    setVideoOff(turnOff);
-  }, [daily, videoOff]);
+  const toggleCamera = () => {
+    const s = localVideoRef.current?.srcObject as MediaStream | null;
+    if (s) s.getVideoTracks().forEach((t) => (t.enabled = !t.enabled));
+    setCameraOn((c) => !c);
+  };
 
-  const startScreen = useCallback(async () => {
-    try {
-      await daily?.startScreenShare();
-      setScreenSharing(true);
-    } catch (e) {
-      console.error("startScreenShare failed", e);
-    }
-  }, [daily]);
+  const reconnect = () => window.location.reload();
 
-  const stopScreen = useCallback(async () => {
-    try {
-      await daily?.stopScreenShare();
-      setScreenSharing(false);
-    } catch (e) {
-      console.error("stopScreenShare failed", e);
-    }
-  }, [daily]);
+  const endCall = () => {
+    peerRef.current?.destroy();
+    stopTimer();
+    onClose();
+  };
 
-  const leave = useCallback(() => daily?.leave(), [daily]);
-
+  // ------------------ UI ---------------------
   return (
     <div className="w-full h-full grid grid-cols-12 gap-4 bg-black rounded">
       <div className="col-span-8 bg-black rounded overflow-hidden relative flex items-center justify-center">
-        {/* remote videos (stacked/first remote) */}
-        <div className="w-full h-full flex items-center justify-center gap-2 p-2 flex-wrap">
-          {Object.values(participants)
-            .filter((p: any) => !p.local)
-            .map((p: any) => (
-              <div key={p.session_id} className="w-1/2 h-1/2 bg-black rounded overflow-hidden">
-                <div style={{ width: "100%", height: "100%" }}>
-                  {/* Daily provides a data attribute for participants which the SDK mounts into */}
-                  <div className="daily-remote-video" data-session-id={p.session_id} style={{ width: "100%", height: "100%" }} />
-                </div>
-                <div className="text-white/80 p-1 text-sm">{p.user_name ?? p.session_id}</div>
-              </div>
-            ))}
-
-          {/* Fallback message */}
-          {Object.values(participants).filter((p: any) => !p.local).length === 0 && (
-            <div className="text-white/70 text-center p-4">Waiting for participant…</div>
-          )}
+        {remoteStream ? (
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <div className="text-white/70 text-center p-4">
+            {status === "connecting" ? "Connecting…" : "Waiting for participant…"}
+          </div>
+        )}
+        <div className="absolute top-4 left-4 text-white bg-white/10 px-2 py-1 rounded text-sm">
+          {status === "connected" ? formatTime(callDuration) : "00:00"}
         </div>
       </div>
 
       <div className="col-span-4 p-4 flex flex-col gap-4">
         <div className="bg-white/5 rounded p-3 flex-1 flex flex-col items-center">
           <div className="w-full h-48 bg-black rounded overflow-hidden">
-            <div className="daily-local-video" data-session-id="local" style={{ width: "100%", height: "100%" }} />
+            <video
+              ref={localVideoRef}
+              autoPlay
+              muted
+              playsInline
+              className="w-full h-full object-cover"
+            />
           </div>
           <div className="text-white mt-2 text-sm">You</div>
         </div>
@@ -104,41 +393,33 @@ const CallUI: React.FC<{ onLeave?: () => void }> = ({ onLeave }) => {
         <div className="bg-white/5 rounded p-3">
           <div className="flex justify-between text-white mb-3">
             <div>Status</div>
-            <div>{daily?.meetingState ?? "idle"}</div>
+            <div>{status}</div>
           </div>
 
           <div className="flex justify-center gap-3">
-            <Button onClick={toggleMute} className="w-10 h-10 rounded-full">{muted ? <MicOff /> : <Mic />}</Button>
-            <Button onClick={toggleCamera} className="w-10 h-10 rounded-full">{videoOff ? <VideoOff /> : <VideoIcon />}</Button>
-            {screenSharing ? (
-              <Button onClick={stopScreen} className="w-10 h-10 rounded-full"><StopCircle /></Button>
-            ) : (
-              <Button onClick={startScreen} className="w-10 h-10 rounded-full"><ScreenShare /></Button>
-            )}
-            <Button onClick={() => window.location.reload()} className="w-10 h-10 rounded-full"><RefreshCw /></Button>
+            <Button onClick={toggleMute} className="w-10 h-10 rounded-full">
+              {muted ? <MicOff /> : <Mic />}
+            </Button>
+            <Button onClick={toggleCamera} className="w-10 h-10 rounded-full">
+              {cameraOn ? <VideoIcon /> : <VideoOff />}
+            </Button>
+            <Button onClick={reconnect} className="w-10 h-10 rounded-full">
+              <RefreshCw />
+            </Button>
           </div>
         </div>
 
         <div className="mt-auto flex justify-center">
-          <Button onClick={leave} variant="destructive" className="rounded-full px-4 py-2"><PhoneOff /> End Call</Button>
+          <Button
+            onClick={endCall}
+            variant="destructive"
+            className="rounded-full px-4 py-2"
+          >
+            <PhoneOff /> End Call
+          </Button>
         </div>
       </div>
     </div>
-  );
-};
-
-const VideoCall: React.FC<VideoCallProps> = ({ roomUrl, onLeave }) => {
-  // DailyProvider auto-joins the room when `url` prop is provided.
-  // We also provide a custom `DailyIframe` instance to ensure the SDK mounts
-  const dailyConfig: Partial<DailyProviderProps> = useMemo(() => ({
-    url: roomUrl,
-    showLeaveButton: false,
-  }), [roomUrl]);
-
-  return (
-    <DailyProvider {...dailyConfig}>
-      <CallUI onLeave={onLeave} />
-    </DailyProvider>
   );
 };
 
