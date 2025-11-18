@@ -1,7 +1,4 @@
-// ------------------------------------------------------
-// VideoCall.tsx — Receiver debugging + polling fallback + TURN
-// ------------------------------------------------------
-
+// VideoCall.tsx — Fixed version (uses your call_signals schema)
 import React, { useEffect, useRef, useState } from "react";
 import SimplePeer from "simple-peer/simplepeer.min.js";
 import { supabase } from "@/integrations/supabase/client";
@@ -25,14 +22,14 @@ localStorage.debug = "simple-peer*";
 
 interface VideoCallProps {
   chatRoomId: string;
-  callerId: string;
-  receiverId: string;
-  currentUserId: string;
+  callerId: string; // original caller's id for this chat
+  receiverId: string; // original receiver's id for this chat
+  currentUserId: string; // currently authenticated user id (auth.uid())
   onClose: () => void;
 }
 
 const POLL_INTERVAL_MS = 2000;
-const POLL_MAX_ATTEMPTS = 10;
+const POLL_MAX_ATTEMPTS = 12;
 
 const VideoCall: React.FC<VideoCallProps> = ({
   chatRoomId,
@@ -58,8 +55,8 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const [callDuration, setCallDuration] = useState(0);
   const timerRef = useRef<number | null>(null);
 
-  const getTargetId = () =>
-    currentUserId === callerId ? receiverId : callerId;
+  const isCaller = currentUserId === callerId;
+  const isReceiver = currentUserId === receiverId;
 
   // ------------------ CAMERA ---------------------
   const startLocalCamera = async () => {
@@ -107,19 +104,50 @@ const VideoCall: React.FC<VideoCallProps> = ({
     return `${m}:${sec}`;
   };
 
+  // ------------------ Helpers -------------------
+  const dbInsertSignal = async (signalObj: any) => {
+    // Always insert with canonical caller_id & receiver_id (table schema)
+    const insertRow = {
+      chat_room_id: chatRoomId,
+      caller_id: callerId,
+      receiver_id: receiverId,
+      type: "webrtc-signal",
+      signal: signalObj,
+      sender_id: currentUserId,
+    };
+
+    try {
+      // Insert and request returned row (use .select() to get inserted row)
+      const { data, error } = await supabase
+        .from("call_signals")
+        .insert([insertRow])
+        .select();
+      if (error) {
+        log.error("❌ supabase insert error:", error);
+        return null;
+      }
+      log.info("📨 Signal inserted (db returned):", data);
+      return data?.[0] ?? null;
+    } catch (e) {
+      log.error("❌ Failed to insert signal", e);
+      return null;
+    }
+  };
+
   // ------------------ PEER ---------------------
   const createPeer = (initiator: boolean, stream: MediaStream) => {
     if (peerRef.current) {
-      log.warn("⚠️ Peer already exists, reusing existing instance.");
+      log.warn("⚠️ Peer already exists; reusing existing instance.");
       return peerRef.current;
     }
 
     log.info("🛠 Creating peer", { initiator }, initiator ? "(CALLER)" : "(RECEIVER)");
     setStatus("connecting");
 
-    // ---- TURN IMPLEMENTED HERE (final version) ----
+    // ICE servers (STUN + TURN). Use reliable TURN for production.
     const ICE_SERVERS = [
       { urls: "stun:stun.l.google.com:19302" },
+      // Example public/pooled TURNs for testing — replace with your TURN credentials for production
       {
         urls: "turn:openrelay.metered.ca:443",
         username: "openrelayproject",
@@ -129,9 +157,8 @@ const VideoCall: React.FC<VideoCallProps> = ({
         urls: "turn:relay1.expressturn.com:3478",
         username: "efBnwpMNpiPqfMp1eG",
         credential: "lo1Q2M28tQerNmuT",
-      }
+      },
     ];
-    // ----------------------------------------------
 
     const p = new SimplePeer({
       initiator,
@@ -140,36 +167,24 @@ const VideoCall: React.FC<VideoCallProps> = ({
       config: { iceServers: ICE_SERVERS },
     });
 
+    // debug native ice state too (some builds expose _pc)
     try {
-      (p as any).on?.("iceStateChange", (state: any) =>
-        log.info("❄ ICE State:", state)
-      );
-    } catch {}
+      (p as any).on?.("iceStateChange", (state: any) => log.info("❄ ICE State:", state));
+      (p as any)._pc && ((p as any)._pc.oniceconnectionstatechange = () =>
+        log.info("🔥 native ICE conn state:", (p as any)._pc.iceConnectionState));
+    } catch (e) { /* ignore */ }
 
+    // when peer has local SDP (offer/answer)
     p.on("signal", async (data: any) => {
-      log.info(
-        initiator ? "📡 CALLER SENDING OFFER/ANSWER" : "📡 RECEIVER SENDING ANSWER",
-        data
-      );
+      log.info(initiator ? "📡 CALLER SENDING OFFER" : "📡 RECEIVER SENDING ANSWER", {
+        type: data?.type ?? "unknown",
+      });
 
-      try {
-        const { data: insertData, error } = await supabase
-          .from("call_signals")
-          .insert({
-            chat_room_id: chatRoomId,
-            caller_id: currentUserId,
-            receiver_id: getTargetId(),
-            type: "webrtc-signal",
-            signal: data,
-          });
-
-        if (error) log.error("❌ supabase insert error:", error);
-        else log.info("📨 Signal inserted successfully:", insertData);
-      } catch (e) {
-        log.error("❌ Failed to insert signal", e);
-      }
+      // insert canonical row into DB (type = 'webrtc-signal')
+      await dbInsertSignal(data);
     });
 
+    // remote stream attached
     p.on("stream", (remote: MediaStream) => {
       log.info("🎥 Remote stream received");
       setRemoteStream(remote);
@@ -184,6 +199,13 @@ const VideoCall: React.FC<VideoCallProps> = ({
       log.info("🔗 WebRTC fully connected");
       setStatus("connected");
       startTimer();
+      // force attach in case
+      setTimeout(() => {
+        if (remoteVideoRef.current && remoteStream) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.play().catch(() => {});
+        }
+      }, 300);
     });
 
     p.on("close", () => {
@@ -202,36 +224,50 @@ const VideoCall: React.FC<VideoCallProps> = ({
   };
 
   // ------------------ POLLING ---------------------
-  const startPollForOffers = (stream: MediaStream) => {
+  const startPollForSignalType = (wantedSignalType: "offer" | "answer", stream: MediaStream) => {
     if (pollIntervalRef.current) return;
     pollAttemptsRef.current = 0;
 
-    log.info("🔁 Starting polling fallback for offers");
+    log.info("🔁 Starting polling fallback for", wantedSignalType);
 
     pollIntervalRef.current = window.setInterval(async () => {
       pollAttemptsRef.current++;
       log.info("🔎 Poll attempt", pollAttemptsRef.current);
 
       try {
-        const { data: rows } = await supabase
+        const { data: rows, error } = await supabase
           .from("call_signals")
           .select("*")
           .eq("chat_room_id", chatRoomId)
-          .eq("receiver_id", currentUserId)
+          // we want rows that are intended for this session (we only store canonical caller/receiver fields)
+          .filter("signal->>type", "eq", wantedSignalType) // checks JSON field "signal.type"
           .order("created_at", { ascending: false })
           .limit(5);
 
-        log.info("🔎 Poll results:", rows?.length ?? 0);
+        if (error) {
+          log.error("❌ Poll supabase error:", error);
+        } else {
+          log.info("🔎 Poll results count:", rows?.length ?? 0);
+        }
 
         if (rows && rows.length) {
           for (const r of rows) {
-            log.info("🔎 Inspect row:", r.id, r.signal);
-            if (r.signal?.type === "offer") {
-              log.info("📩 OFFER found via polling");
+            log.info("🔎 Inspect row:", r.id, r.signal?.type, r.signal?.sdp ? "(sdp present)" : "");
+            if (r.signal && r.signal.type === wantedSignalType) {
+              log.info(`📩 Found ${wantedSignalType.toUpperCase()} in DB via polling`);
 
-              if (!peerRef.current) createPeer(false, stream);
+              // create peer if missing
+              if (!peerRef.current) {
+                log.info("🛠 Creating peer to apply polled signal");
+                createPeer(wantedSignalType === "offer" ? false : true, stream);
+              }
 
-              peerRef.current?.signal(r.signal);
+              try {
+                peerRef.current?.signal(r.signal);
+                log.info("📡 Applied polled signal to peer");
+              } catch (e) {
+                log.error("❌ Failed applying polled signal", e);
+              }
 
               stopPollForOffers();
               return;
@@ -239,7 +275,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
           }
         }
       } catch (e) {
-        log.error("❌ Poll error:", e);
+        log.error("❌ Exception while polling:", e);
       }
 
       if (pollAttemptsRef.current >= POLL_MAX_ATTEMPTS) {
@@ -262,26 +298,28 @@ const VideoCall: React.FC<VideoCallProps> = ({
     let signalChannel: any = null;
 
     const setup = async () => {
-      log.info("🚀 Setting up WebRTC");
+      log.info("🚀 Setting up WebRTC (full flow)");
 
       log.info("📌 ROLE CHECK:", {
         currentUserId,
         callerId,
         receiverId,
-        isCaller: currentUserId === callerId,
-        isReceiver: currentUserId === receiverId,
+        isCaller,
+        isReceiver,
       });
 
       const stream = await startLocalCamera();
 
-      if (currentUserId === callerId) {
-        log.info("📞 Caller → creating OFFER");
+      // If caller, create initiator peer immediately (it will generate offer and insert it)
+      if (isCaller) {
+        log.info("📞 Caller → creating initiator peer (will emit OFFER)");
         createPeer(true, stream);
       } else {
-        log.info("📞 Receiver → waiting for offer");
+        log.info("📞 Receiver → waiting for OFFER (realtime). If none arrives, poll.");
       }
 
-      // realtime listener
+      // Realtime subscription for rows intended for this user:
+      // filter by chat_room_id & receiver_id (AND) — use & for AND
       try {
         signalChannel = supabase
           .channel(`rtc-${chatRoomId}-${currentUserId}`)
@@ -291,35 +329,90 @@ const VideoCall: React.FC<VideoCallProps> = ({
               event: "INSERT",
               schema: "public",
               table: "call_signals",
+              // NB: AND must be encoded with & (not comma)
               filter: `chat_room_id=eq.${chatRoomId}&receiver_id=eq.${currentUserId}`,
             },
             async (payload: any) => {
               const row = payload.new;
               log.info("📬 SIGNAL (realtime):", row);
 
-              const signal = row.signal;
-
-              if (!peerRef.current && signal.type === "offer") {
-                log.info("🛠 Receiver → creating peer on offer");
-                createPeer(false, stream);
+              if (!row || !row.signal) {
+                log.warn("⚠️ realtime row missing signal -> skipping");
+                return;
               }
 
-              peerRef.current?.signal(signal);
-              stopPollForOffers();
+              const signalObj = row.signal;
+
+              // if it's an OFFER and we're receiver -> create peer non-initiator and apply it
+              if (signalObj.type === "offer") {
+                log.info("📩 INCOMING OFFER (realtime)");
+                if (!peerRef.current) {
+                  log.info("🛠 Creating receiver peer because we received an offer");
+                  createPeer(false, stream);
+                }
+                try {
+                  peerRef.current?.signal(signalObj);
+                  log.info("📡 Applied OFFER (realtime) to peer");
+                } catch (e) {
+                  log.error("❌ Failed to apply OFFER (realtime)", e);
+                }
+                stopPollForOffers();
+                return;
+              }
+
+              // if it's an ANSWER and we're caller -> apply it
+              if (signalObj.type === "answer") {
+                log.info("📩 INCOMING ANSWER (realtime)");
+                if (!peerRef.current) {
+                  log.error("❌ Caller has no peerRef to apply ANSWER to");
+                  return;
+                }
+                try {
+                  peerRef.current?.signal(signalObj);
+                  log.info("📡 Applied ANSWER (realtime) to peer");
+                } catch (e) {
+                  log.error("❌ Failed to apply ANSWER (realtime)", e);
+                }
+                stopPollForOffers();
+                return;
+              }
+
+              // otherwise just attempt to apply any other signal types
+              try {
+                if (peerRef.current) {
+                  peerRef.current.signal(signalObj);
+                  log.info("📡 Applied generic signal (realtime)");
+                }
+              } catch (e) {
+                log.error("❌ Failed applying generic realtime signal", e);
+              }
             }
           )
           .subscribe((status: any) => {
             log.info("📶 subscription status:", status);
           });
 
-        if (currentUserId === receiverId) {
+        // Poll fallback:
+        // - If receiver: poll for OFFERs
+        // - If caller: poll for ANSWERs
+        if (isReceiver) {
           setTimeout(() => {
-            if (!peerRef.current) startPollForOffers(stream);
-          }, 2000);
+            if (!peerRef.current) {
+              startPollForSignalType("offer", stream);
+            }
+          }, 1500);
+        } else if (isCaller) {
+          setTimeout(() => {
+            // start polling for answer if none arrives in realtime
+            if (!peerRef.current) {
+              startPollForSignalType("answer", stream);
+            }
+          }, 1500);
         }
       } catch (e) {
         log.error("❌ subscription error:", e);
-        if (currentUserId === receiverId) startPollForOffers(stream);
+        if (isReceiver) startPollForSignalType("offer", stream);
+        if (isCaller) startPollForSignalType("answer", stream);
       }
     };
 
@@ -336,6 +429,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
         ?.getTracks()
         .forEach((t) => t.stop());
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ------------------ UI CONTROLS ---------------------
