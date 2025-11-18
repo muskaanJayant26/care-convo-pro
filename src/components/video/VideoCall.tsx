@@ -21,9 +21,9 @@ localStorage.debug = "simple-peer*";
 
 interface VideoCallProps {
   chatRoomId: string;
-  callerId: string;
-  receiverId: string;
-  currentUserId: string;
+  callerId: string; // original caller's id
+  receiverId: string; // original receiver's id
+  currentUserId: string; // currently authenticated user id
   onClose: () => void;
 }
 
@@ -61,13 +61,17 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const startLocalCamera = async () => {
     log.info("🎥 Requesting user media...");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      log.info("Local tracks:", stream.getTracks());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+
       setLocalStream(stream);
 
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
-        localVideoRef.current.play().catch((e) => log.error("Local video play error:", e));
+        localVideoRef.current.onloadedmetadata = () =>
+          localVideoRef.current?.play().catch(() => {});
       }
 
       log.info("🎥 Local camera ready");
@@ -79,33 +83,24 @@ const VideoCall: React.FC<VideoCallProps> = ({
     }
   };
 
-  // ------------------ REMOTE VIDEO ATTACH ---------------------
-  useEffect(() => {
-    if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
-      remoteVideoRef.current
-        .play()
-        .then(() => log.info("🎥 Remote video playing"))
-        .catch((e) => log.warn("Autoplay blocked, trying muted playback:", e));
-    }
-  }, [remoteStream]);
-
   // ------------------ TIMER ---------------------
   const startTimer = () => {
     if (timerRef.current) return;
     timerRef.current = window.setInterval(() => setCallDuration((c) => c + 1), 1000);
   };
+
   const stopTimer = () => {
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = null;
   };
+
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60).toString().padStart(2, "0");
     const sec = (s % 60).toString().padStart(2, "0");
     return `${m}:${sec}`;
   };
 
-  // ------------------ DB SIGNAL ---------------------
+  // ------------------ HELPERS -------------------
   const dbInsertSignal = async (signalObj: any) => {
     const insertRow = {
       chat_room_id: chatRoomId,
@@ -115,9 +110,19 @@ const VideoCall: React.FC<VideoCallProps> = ({
       signal: signalObj,
       sender_id: currentUserId,
     };
+
     try {
-      const { data, error } = await supabase.from("call_signals").insert([insertRow]).select();
-      if (error) log.error("❌ supabase insert error:", error);
+      const { data, error } = await supabase
+        .from("call_signals")
+        .insert([insertRow])
+        .select();
+
+      if (error) {
+        log.error("❌ supabase insert error:", error);
+        return null;
+      }
+
+      log.info("📨 Signal inserted (db returned):", data);
       return data?.[0] ?? null;
     } catch (e) {
       log.error("❌ Failed to insert signal", e);
@@ -127,33 +132,72 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
   // ------------------ PEER ---------------------
   const createPeer = (initiator: boolean, stream: MediaStream) => {
-    if (peerRef.current) return peerRef.current;
+    if (peerRef.current) {
+      log.warn("⚠️ Peer already exists; reusing existing instance.");
+      return peerRef.current;
+    }
 
-    log.info("🛠 Creating peer", initiator ? "(CALLER)" : "(RECEIVER)");
+    log.info("🛠 Creating peer", { initiator }, initiator ? "(CALLER)" : "(RECEIVER)");
     setStatus("connecting");
 
     const ICE_SERVERS = [
       { urls: "stun:stun.l.google.com:19302" },
-      { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-      { urls: "turn:relay1.expressturn.com:3478", username: "efBnwpMNpiPqfMp1eG", credential: "lo1Q2M28tQerNmuT" },
+      {
+        urls: "turn:openrelay.metered.ca:443",
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      },
+      {
+        urls: "turn:relay1.expressturn.com:3478",
+        username: "efBnwpMNpiPqfMp1eG",
+        credential: "lo1Q2M28tQerNmuT",
+      },
     ];
 
-    const p = new SimplePeer({ initiator, trickle: false, stream, config: { iceServers: ICE_SERVERS } });
+    const p = new SimplePeer({
+      initiator,
+      trickle: false,
+      stream,
+      config: { iceServers: ICE_SERVERS },
+    });
 
-    p.on("signal", async (data) => {
-      log.info("📡 Sending signal", data?.type);
+    // Debug ICE state
+    try {
+      (p as any).on?.("iceStateChange", (state: any) => log.info("❄ ICE State:", state));
+      (p as any)._pc &&
+        ((p as any)._pc.oniceconnectionstatechange = () =>
+          log.info("🔥 native ICE conn state:", (p as any)._pc.iceConnectionState));
+    } catch (e) {}
+
+    // Signal event
+    p.on("signal", async (data: any) => {
+      log.info(initiator ? "📡 CALLER SENDING OFFER" : "📡 RECEIVER SENDING ANSWER", {
+        type: data?.type ?? "unknown",
+      });
       await dbInsertSignal(data);
     });
 
+    // Remote stream
     p.on("stream", (remote: MediaStream) => {
-      log.info("🎥 Remote stream received", remote.getTracks());
+      log.info("🎥 Remote stream received");
       setRemoteStream(remote);
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remote;
+        remoteVideoRef.current.onloadedmetadata = () =>
+          remoteVideoRef.current?.play().catch(() => {});
+      }
     });
 
     p.on("connect", () => {
-      log.info("🔗 Peer connected");
+      log.info("🔗 WebRTC fully connected");
       setStatus("connected");
       startTimer();
+      setTimeout(() => {
+        if (remoteVideoRef.current && remoteStream) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.play().catch(() => {});
+        }
+      }, 300);
     });
 
     p.on("close", () => {
@@ -162,7 +206,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
       stopTimer();
     });
 
-    p.on("error", (err) => {
+    p.on("error", (err: any) => {
       log.error("❌ Peer error", err);
       setStatus("error");
     });
@@ -171,13 +215,68 @@ const VideoCall: React.FC<VideoCallProps> = ({
     return p;
   };
 
+  // ------------------ POLLING ---------------------
+  const startPollForSignalType = (wantedSignalType: "offer" | "answer", stream: MediaStream) => {
+    if (pollIntervalRef.current) return;
+    pollAttemptsRef.current = 0;
+
+    log.info("🔁 Starting polling fallback for", wantedSignalType);
+
+    pollIntervalRef.current = window.setInterval(async () => {
+      pollAttemptsRef.current++;
+      log.info("🔎 Poll attempt", pollAttemptsRef.current);
+
+      try {
+        const { data: rows, error } = await supabase
+          .from("call_signals")
+          .select("*")
+          .eq("chat_room_id", chatRoomId)
+          .filter("signal->>type", "eq", wantedSignalType)
+          .order("created_at", { ascending: false })
+          .limit(5);
+
+        if (error) log.error("❌ Poll supabase error:", error);
+        if (rows?.length) {
+          for (const r of rows) {
+            log.info("🔎 Inspect row:", r.id, r.signal?.type);
+            if (r.signal && r.signal.type === wantedSignalType) {
+              log.info(`📩 Found ${wantedSignalType.toUpperCase()} in DB via polling`);
+              if (!peerRef.current) createPeer(wantedSignalType === "offer" ? false : true, stream);
+              try {
+                peerRef.current?.signal(r.signal);
+                log.info("📡 Applied polled signal to peer");
+              } catch (e) {
+                log.error("❌ Failed applying polled signal", e);
+              }
+              stopPollForOffers();
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        log.error("❌ Exception while polling:", e);
+      }
+
+      if (pollAttemptsRef.current >= POLL_MAX_ATTEMPTS) stopPollForOffers();
+    }, POLL_INTERVAL_MS);
+  };
+
+  const stopPollForOffers = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+      log.info("🔁 Polling stopped");
+    }
+  };
+
   // ------------------ SETUP ---------------------
   useEffect(() => {
     let signalChannel: any = null;
 
     const setup = async () => {
-      log.info("🚀 Setting up WebRTC");
+      log.info("🚀 Setting up WebRTC (full flow)");
       const stream = await startLocalCamera();
+
       if (isCaller) createPeer(true, stream);
 
       try {
@@ -199,18 +298,27 @@ const VideoCall: React.FC<VideoCallProps> = ({
               if (signalObj.type === "offer" && isReceiver) {
                 if (!peerRef.current) createPeer(false, stream);
                 peerRef.current?.signal(signalObj);
+                stopPollForOffers();
                 return;
               }
+
               if (signalObj.type === "answer" && isCaller) {
                 peerRef.current?.signal(signalObj);
+                stopPollForOffers();
                 return;
               }
+
               peerRef.current?.signal(signalObj);
             }
           )
           .subscribe();
+
+        if (isReceiver) setTimeout(() => !peerRef.current && startPollForSignalType("offer", stream), 1500);
+        if (isCaller) setTimeout(() => !peerRef.current && startPollForSignalType("answer", stream), 1500);
       } catch (e) {
         log.error("❌ subscription error:", e);
+        if (isReceiver) startPollForSignalType("offer", stream);
+        if (isCaller) startPollForSignalType("answer", stream);
       }
     };
 
@@ -219,6 +327,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
     return () => {
       peerRef.current?.destroy();
       stopTimer();
+      stopPollForOffers();
       if (signalChannel) supabase.removeChannel(signalChannel);
       localVideoRef.current?.srcObject &&
         (localVideoRef.current.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
@@ -231,18 +340,22 @@ const VideoCall: React.FC<VideoCallProps> = ({
     if (s) s.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
     setMuted((m) => !m);
   };
+
   const toggleCamera = () => {
     const s = localVideoRef.current?.srcObject as MediaStream | null;
     if (s) s.getVideoTracks().forEach((t) => (t.enabled = !t.enabled));
     setCameraOn((c) => !c);
   };
+
   const reconnect = () => window.location.reload();
+
   const endCall = () => {
     peerRef.current?.destroy();
     stopTimer();
     onClose();
   };
 
+  // ------------------ UI ---------------------
   return (
     <div className="w-full h-full grid grid-cols-12 gap-4 bg-black rounded">
       <div className="col-span-8 bg-black rounded overflow-hidden relative flex items-center justify-center">
@@ -251,7 +364,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
             ref={remoteVideoRef}
             autoPlay
             playsInline
-            muted // ensures autoplay works
             className="w-full h-full object-cover"
           />
         ) : (
@@ -298,7 +410,11 @@ const VideoCall: React.FC<VideoCallProps> = ({
         </div>
 
         <div className="mt-auto flex justify-center">
-          <Button onClick={endCall} variant="destructive" className="rounded-full px-4 py-2">
+          <Button
+            onClick={endCall}
+            variant="destructive"
+            className="rounded-full px-4 py-2"
+          >
             <PhoneOff /> End Call
           </Button>
         </div>
