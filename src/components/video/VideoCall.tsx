@@ -6,7 +6,14 @@ import React, { useEffect, useRef, useState } from "react";
 import SimplePeer from "simple-peer/simplepeer.min.js";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { PhoneOff, Mic, MicOff, Video as VideoIcon, VideoOff, RefreshCw } from "lucide-react";
+import {
+  PhoneOff,
+  Mic,
+  MicOff,
+  Video as VideoIcon,
+  VideoOff,
+  RefreshCw,
+} from "lucide-react";
 
 const log = {
   info: (...m: any[]) => console.log("%c[RTC]", "color:#4ade80;font-weight:bold;", ...m),
@@ -110,16 +117,21 @@ const VideoCall: React.FC<VideoCallProps> = ({
     log.info("🛠 Creating peer", { initiator }, initiator ? "(CALLER)" : "(RECEIVER)");
     setStatus("connecting");
 
-    // ---- ADDED TURN HERE ----
+    // ---- TURN IMPLEMENTED HERE (final version) ----
     const ICE_SERVERS = [
       { urls: "stun:stun.l.google.com:19302" },
       {
-        urls: "turn:turn.anyfirewall.com:443?transport=tcp",
-        username: "webrtc",
-        credential: "webrtc",
+        urls: "turn:openrelay.metered.ca:443",
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      },
+      {
+        urls: "turn:relay1.expressturn.com:3478",
+        username: "efBnwpMNpiPqfMp1eG",
+        credential: "lo1Q2M28tQerNmuT",
       }
     ];
-    // -------------------------
+    // ----------------------------------------------
 
     const p = new SimplePeer({
       initiator,
@@ -132,7 +144,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
       (p as any).on?.("iceStateChange", (state: any) =>
         log.info("❄ ICE State:", state)
       );
-    } catch (e) {}
+    } catch {}
 
     p.on("signal", async (data: any) => {
       log.info(
@@ -352,10 +364,17 @@ const VideoCall: React.FC<VideoCallProps> = ({
     <div className="w-full h-full grid grid-cols-12 gap-4 bg-black rounded">
       <div className="col-span-8 bg-black rounded overflow-hidden relative flex items-center justify-center">
         {remoteStream ? (
-          <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            className="w-full h-full object-cover"
+          />
         ) : (
           <div className="text-white/70 text-center p-4">
-            {status === "connecting" ? "Connecting…" : "Waiting for participant…"}
+            {status === "connecting"
+              ? "Connecting…"
+              : "Waiting for participant…"}
           </div>
         )}
 
@@ -367,7 +386,13 @@ const VideoCall: React.FC<VideoCallProps> = ({
       <div className="col-span-4 p-4 flex flex-col gap-4">
         <div className="bg-white/5 rounded p-3 flex-1 flex flex-col items-center">
           <div className="w-full h-48 bg-black rounded overflow-hidden">
-            <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+            <video
+              ref={localVideoRef}
+              autoPlay
+              muted
+              playsInline
+              className="w-full h-full object-cover"
+            />
           </div>
           <div className="text-white mt-2 text-sm">You</div>
         </div>
@@ -392,7 +417,11 @@ const VideoCall: React.FC<VideoCallProps> = ({
         </div>
 
         <div className="mt-auto flex justify-center">
-          <Button onClick={endCall} variant="destructive" className="rounded-full px-4 py-2">
+          <Button
+            onClick={endCall}
+            variant="destructive"
+            className="rounded-full px-4 py-2"
+          >
             <PhoneOff /> End Call
           </Button>
         </div>
