@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import SimplePeer from "simple-peer";
+import SimplePeer from "simple-peer/simplepeer.min.js";
+
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { PhoneOff, Mic, MicOff, Video as VideoIcon, VideoOff, RefreshCw } from "lucide-react";
@@ -20,10 +21,13 @@ interface VideoCallProps {
   currentUserId: string;
   onClose: () => void;
 }
-
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
-  // Add TURN servers here if you have them. Public test TURN servers are unreliable.
+  {
+    urls: "turn:openrelay.metered.ca:443",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  }
 ];
 
 const VideoCall: React.FC<VideoCallProps> = ({ chatRoomId, callerId, receiverId, currentUserId, onClose }) => {
@@ -159,34 +163,47 @@ const VideoCall: React.FC<VideoCallProps> = ({ chatRoomId, callerId, receiverId,
         }
 
         // Subscribe to all inserts and filter in-code (works across supabase versions)
-        const channel = supabase
-          .from("call_signals")
-          .on("INSERT", (payload: any) => {
-            const row = payload.new;
-            if (!row || row.chat_room_id !== chatRoomId) return;
-            // ignore signals sent by me
-            if (row.sender_id === currentUserId) return;
+     // Subscribe to realtime using the new channel API
+const channel = supabase.channel(`call_signals_${chatRoomId}`);
 
-            const signal = row.signal;
-            if (!signal) return;
+channel.on(
+  "postgres_changes",
+  {
+    event: "INSERT",
+    schema: "public",
+    table: "call_signals",
+    filter: `chat_room_id=eq.${chatRoomId}`,
+  },
+  (payload: any) => {
+    const row = payload.new;
+    if (!row) return;
 
-            // Only deliver offers to receiver and answers to caller (but other ICE may flow through too)
-            if (signal.type === "offer" && isReceiver) {
-              applySignal(signal, local);
-              return;
-            }
+    // ignore my own signals
+    if (row.sender_id === currentUserId) return;
 
-            if (signal.type === "answer" && isCaller) {
-              applySignal(signal, local);
-              return;
-            }
+    const signal = row.signal;
+    if (!signal) return;
 
-            // For ICE or other messages, just apply
-            applySignal(signal, local);
-          })
-          .subscribe();
+    // deliver offer → receiver
+    if (signal.type === "offer" && isReceiver) {
+      applySignal(signal, local);
+      return;
+    }
 
-        subRef.current = channel;
+    // deliver answer → caller
+    if (signal.type === "answer" && isCaller) {
+      applySignal(signal, local);
+      return;
+    }
+
+    // deliver additional ICE / renegotiation messages
+    applySignal(signal, local);
+  }
+);
+
+await channel.subscribe();
+subRef.current = channel;
+
 
         // Fallback polling: in case realtime fails (optional)
         // You can implement a polling fallback here similar to your previous code.
@@ -207,7 +224,8 @@ const VideoCall: React.FC<VideoCallProps> = ({ chatRoomId, callerId, receiverId,
 
       if (subRef.current) {
         try {
-          supabase.removeSubscription?.(subRef.current);
+          supabase.removeChannel(subRef.current);
+
         } catch (e) {
           try {
             supabase.removeChannel?.(subRef.current);
