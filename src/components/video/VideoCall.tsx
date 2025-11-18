@@ -75,7 +75,17 @@ const VideoCall: React.FC<VideoCallProps> = ({ chatRoomId, callerId, receiverId,
 
       p.on('signal', async (data: any) => {
         try {
-          await supabase.from('call_signals').insert({ chat_room_id: chatRoomId, caller_id: callerId, receiver_id: receiverId, type: 'webrtc-signal', signal: data });
+// send signal to the *other* user
+const targetUserId = currentUserId === callerId ? receiverId : callerId;
+
+await supabase.from("call_signals").insert({
+  chat_room_id: chatRoomId,
+  sender_id: currentUserId,
+  receiver_id: targetUserId,
+  type: "webrtc-signal",
+  signal: data
+});
+
         } catch (err) {
           console.error('sendSignal error', err);
         }
@@ -103,23 +113,29 @@ const VideoCall: React.FC<VideoCallProps> = ({ chatRoomId, callerId, receiverId,
       });
 
       // subscribe to webrtc-signal rows for this chat
-      const signalChannel = supabase
-        .channel(`rtc-${chatRoomId}`)
-        .on(
-          'postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'call_signals', filter: `chat_room_id=eq.${chatRoomId}` },
-          (payload) => {
-            const data = payload.new as any;
-            if (data.type !== 'webrtc-signal') return;
-            try {
-              // SimplePeer will ignore invalid/duplicate signals
-              peerRef.current?.signal(data.signal);
-            } catch (err) {
-              console.warn('signal apply error', err);
-            }
-          }
-        )
-        .subscribe();
+    const signalChannel = supabase
+  .channel(`rtc-${chatRoomId}-${currentUserId}`)
+  .on(
+    "postgres_changes",
+    {
+      event: "INSERT",
+      schema: "public",
+      table: "call_signals",
+      filter: `chat_room_id=eq.${chatRoomId},receiver_id=eq.${currentUserId}`
+    },
+    (payload) => {
+      const data = payload.new;
+      if (data.type !== "webrtc-signal") return;
+
+      try {
+        peerRef.current?.signal(data.signal);
+      } catch (err) {
+        console.warn("signal apply error", err);
+      }
+    }
+  )
+  .subscribe();
+
 
       // cleanup
       return () => {
