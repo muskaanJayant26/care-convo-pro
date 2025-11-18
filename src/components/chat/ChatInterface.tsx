@@ -1,9 +1,8 @@
-// FILE: ChatInterface.tsx
+// ChatInterface.tsx
 // Replace your existing ChatInterface with this file.
 // Requires: simple-peer, date-fns, lucide-react, supabase client, UI components referenced
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import SimplePeer from 'simple-peer';
 import { supabase } from '@/integrations/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,6 +44,41 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [incomingCall, setIncomingCall] = useState<any>(null);
   const [activeCall, setActiveCall] = useState<null | { caller_id: string; receiver_id: string; chat_room_id: string }>(null);
   const [isOutgoingCalling, setIsOutgoingCalling] = useState(false);
+
+  // call duration state & timer ref
+  const [callDuration, setCallDuration] = useState(0);
+  const callTimerRef = useRef<number | null>(null);
+
+  // start/stop timer when an active call UI is visible (either outgoing or accepted)
+  useEffect(() => {
+    const visible = Boolean(activeCall) || isOutgoingCalling;
+    if (visible) {
+      if (callTimerRef.current == null) {
+        callTimerRef.current = window.setInterval(() => {
+          setCallDuration((t) => t + 1);
+        }, 1000);
+      }
+    } else {
+      if (callTimerRef.current != null) {
+        clearInterval(callTimerRef.current);
+        callTimerRef.current = null;
+        setCallDuration(0);
+      }
+    }
+
+    return () => {
+      if (callTimerRef.current != null) {
+        clearInterval(callTimerRef.current);
+        callTimerRef.current = null;
+      }
+    };
+  }, [activeCall, isOutgoingCalling]);
+
+  const formatDuration = (sec: number) => {
+    const m = Math.floor(sec / 60).toString().padStart(2, '0');
+    const s = (sec % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
 
   // fetch messages on mount / chatRoomId change
   useEffect(() => {
@@ -91,18 +125,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           if (data.type === 'call-offer' && data.receiver_id === currentUserId) {
             // show incoming call popup
             setIncomingCall(data);
-            // play ringtone (optional)
             tryPlayRingtone();
           }
 
-          // call accepted: notify caller to open video call
+          // call accepted: notify caller & receiver to open VideoCall UI
           if (data.type === 'call-accepted') {
-            // if I'm the caller OR I'm the receiver who accepted, open VideoCall
             if (data.caller_id === currentUserId || data.receiver_id === currentUserId) {
-              // ensure activeCall is set for VideoCall props
               setActiveCall({ caller_id: data.caller_id, receiver_id: data.receiver_id, chat_room_id: data.chat_room_id });
               setIncomingCall(null);
               setIsOutgoingCalling(false);
+              stopRingtone();
             }
           }
 
@@ -112,8 +144,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             setIsOutgoingCalling(false);
             stopRingtone();
           }
-
-          // optional: webrtc-signal events are handled in VideoCall component directly
         }
       )
       .subscribe();
@@ -191,28 +221,34 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     ringtoneRef.current = null;
   }
 
-  // startCall triggered by caller
+  // startCall triggered by caller (shows VideoCall UI immediately)
   const startCall = async () => {
     try {
+      // show caller UI immediately
+      setActiveCall({ caller_id: currentUserId, receiver_id: otherUserId, chat_room_id: chatRoomId });
+      setIsOutgoingCalling(true);
+      setCallDuration(0);
+
       // insert call offer into call_signals; receiver will see this
       await supabase.from('call_signals').insert({ chat_room_id: chatRoomId, caller_id: currentUserId, receiver_id: otherUserId, type: 'call-offer' });
+
       toast({ title: 'Calling', description: `Ringing ${otherUserName}...` });
-      setIsOutgoingCalling(true);
-      // activeCall will be set when we receive call-accepted event
     } catch (err) {
       console.error('startCall error', err);
       toast({ title: 'Error', description: 'Failed to start call' });
+      // rollback UI
+      setActiveCall(null);
+      setIsOutgoingCalling(false);
     }
   };
 
   const acceptCall = async () => {
     if (!incomingCall) return;
     try {
-      // stop ringtone
       stopRingtone();
       // insert accepted signal
       await supabase.from('call_signals').insert({ chat_room_id: chatRoomId, caller_id: incomingCall.caller_id, receiver_id: incomingCall.receiver_id, type: 'call-accepted' });
-      // set activeCall for the local client
+      // set activeCall for the local client (show VideoCall)
       setActiveCall({ caller_id: incomingCall.caller_id, receiver_id: incomingCall.receiver_id, chat_room_id: chatRoomId });
       setIncomingCall(null);
     } catch (err) {
@@ -236,6 +272,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   // When VideoCall ends it'll call onClose to clear activeCall
   const handleVideoCallClose = () => {
     setActiveCall(null);
+    setIsOutgoingCalling(false);
+    setCallDuration(0);
   };
 
   return (
@@ -259,13 +297,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       )}
 
       {/* If an active call exists show the VideoCall component overlay */}
-      {activeCall && (
+      {(activeCall || isOutgoingCalling) && (
         <div className="absolute inset-0 z-40 bg-black/60 flex items-center justify-center">
           <div className="bg-white rounded-lg p-4 w-full max-w-4xl h-[90vh]">
+            <div className="text-center text-sm text-muted-foreground mb-2">
+              {isOutgoingCalling && !activeCall ? "Calling..." : `Call Duration: ${formatDuration(callDuration)}`}
+            </div>
+
             <VideoCall
               chatRoomId={chatRoomId}
-              callerId={activeCall.caller_id}
-              receiverId={activeCall.receiver_id}
+              callerId={activeCall ? activeCall.caller_id : currentUserId}
+              receiverId={activeCall ? activeCall.receiver_id : otherUserId}
               currentUserId={currentUserId}
               onClose={handleVideoCallClose}
             />
@@ -315,5 +357,3 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 };
 
 export default ChatInterface;
-
-
