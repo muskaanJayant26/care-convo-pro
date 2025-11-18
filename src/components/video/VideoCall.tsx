@@ -184,7 +184,8 @@ const VideoCall: React.FC<VideoCallProps> = ({ chatRoomId, callerId, receiverId,
             event: "INSERT",
             schema: "public",
             table: "call_signals",
-            filter: `chat_room_id=eq.${chatRoomId}`,
+            filter: `chat_room_id=eq.${chatRoomId},receiver_id=eq.${currentUserId}`,
+
           },
           async (payload: any) => {
             const row = payload.new;
