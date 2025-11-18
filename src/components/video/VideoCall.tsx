@@ -192,12 +192,16 @@ const VideoCall: React.FC<VideoCallProps> = ({ chatRoomId, callerId, receiverId,
 
             log.info("📩 Received Signal:", row.signal);
 
-            if (!peerRef.current) {
-              log.info("🛠 Creating non-initiator peer on receiver side");
-              createPeer(false, stream);
-            }
+           // Only create peer when the RECEIVER gets the OFFER
+if (!peerRef.current && row.signal?.type === "offer") {
+  log.info("🛠 Creating non-initiator peer (only on OFFER)");
+  createPeer(false, stream);
+}
 
-            peerRef.current?.signal(row.signal);
+// Apply signal only AFTER peer exists
+if (peerRef.current) {
+  peerRef.current.signal(row.signal);
+}
           }
         )
         .subscribe();
