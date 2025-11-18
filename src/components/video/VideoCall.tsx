@@ -24,10 +24,10 @@ interface VideoCallProps {
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   {
-    urls: "turn:openrelay.metered.ca:443",
-    username: "openrelayproject",
-    credential: "openrelayproject",
-  }
+    urls: "turn:relay1.expressturn.com:3478",
+    username: "efU9QnF5nRzQZg",
+    credential: "31S4Q5YjT8x72Q",
+  },
 ];
 
 const VideoCall: React.FC<VideoCallProps> = ({ chatRoomId, callerId, receiverId, currentUserId, onClose }) => {
