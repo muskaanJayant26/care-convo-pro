@@ -11,25 +11,32 @@ import {
   RefreshCw,
 } from "lucide-react";
 
-const log = {
-  info: (...m: any[]) => console.log("%c[RTC]", "color:#4ade80;font-weight:bold;", ...m),
-  warn: (...m: any[]) => console.warn("%c[RTC]", "color:#facc15;font-weight:bold;", ...m),
-  error: (...m: any[]) => console.error("%c[RTC]", "color:#ef4444;font-weight:bold;", ...m),
-};
-
-localStorage.debug = "simple-peer*";
-
+/* -----------------------------------------------------------
+   VideoCall Props
+----------------------------------------------------------- */
 interface VideoCallProps {
   chatRoomId: string;
-  callerId: string; // original caller's id
-  receiverId: string; // original receiver's id
-  currentUserId: string; // currently authenticated user id
+  callerId: string;
+  receiverId: string;
+  currentUserId: string;
   onClose: () => void;
 }
 
-const POLL_INTERVAL_MS = 2000;
-const POLL_MAX_ATTEMPTS = 12;
+/* -----------------------------------------------------------
+   ICE Servers
+----------------------------------------------------------- */
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  {
+    urls: "turn:openrelay.metered.ca:443",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+];
 
+/* -----------------------------------------------------------
+   VideoCall Component
+----------------------------------------------------------- */
 const VideoCall: React.FC<VideoCallProps> = ({
   chatRoomId,
   callerId,
@@ -40,174 +47,118 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerRef = useRef<SimplePeer.Instance | null>(null);
-
-  const pollIntervalRef = useRef<number | null>(null);
-  const pollAttemptsRef = useRef(0);
+  const subRef = useRef<any>(null);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-
   const [muted, setMuted] = useState(false);
   const [cameraOn, setCameraOn] = useState(true);
-  const [status, setStatus] = useState<"connecting" | "connected" | "idle" | "error">("idle");
-
-  const [callDuration, setCallDuration] = useState(0);
-  const timerRef = useRef<number | null>(null);
+  const [status, setStatus] = useState<
+    "idle" | "connecting" | "connected" | "error"
+  >("idle");
 
   const isCaller = currentUserId === callerId;
   const isReceiver = currentUserId === receiverId;
 
-  // ------------------ CAMERA ---------------------
+  /* -----------------------------------------------------------
+     Start Camera
+  ----------------------------------------------------------- */
   const startLocalCamera = async () => {
-    log.info("🎥 Requesting user media...");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const s = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
 
-      setLocalStream(stream);
+      setLocalStream(s);
 
       if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.onloadedmetadata = () =>
-          localVideoRef.current?.play().catch(() => { });
+        localVideoRef.current.srcObject = s;
+        localVideoRef.current.muted = true;
+        await localVideoRef.current.play().catch(() => {});
       }
 
-      log.info("🎥 Local camera ready");
-      return stream;
+      return s;
     } catch (e) {
-      log.error("❌ getUserMedia failed", e);
+      console.error("Failed to getUserMedia", e);
       setStatus("error");
       throw e;
     }
   };
 
-  // ------------------ TIMER ---------------------
-  const startTimer = () => {
-    if (timerRef.current) return;
-    timerRef.current = window.setInterval(() => setCallDuration((c) => c + 1), 1000);
-  };
-
-  const stopTimer = () => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = null;
-  };
-
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60).toString().padStart(2, "0");
-    const sec = (s % 60).toString().padStart(2, "0");
-    return `${m}:${sec}`;
-  };
-
-  // ------------------ HELPERS -------------------
-  const dbInsertSignal = async (signalObj: any) => {
-    const insertRow = {
-      chat_room_id: chatRoomId,
-      caller_id: callerId,
-      receiver_id: receiverId,
-      type: "webrtc-signal",
-      signal: signalObj,
-      sender_id: currentUserId,
-    };
-
+  /* -----------------------------------------------------------
+     Insert signal to Supabase
+  ----------------------------------------------------------- */
+  const insertSignalRow = async (signal: any) => {
     try {
       const { data, error } = await supabase
         .from("call_signals")
-        .insert([insertRow])
+        .insert([
+          {
+            chat_room_id: chatRoomId,
+            caller_id: callerId,
+            receiver_id: receiverId,
+            sender_id: currentUserId,
+            type: "webrtc-signal",
+            signal,
+          },
+        ])
         .select();
 
       if (error) {
-        log.error("❌ supabase insert error:", error);
+        console.error("supabase insert error", error);
         return null;
       }
 
-      log.info("📨 Signal inserted (db returned):", data);
       return data?.[0] ?? null;
     } catch (e) {
-      log.error("❌ Failed to insert signal", e);
+      console.error("insertSignalRow exception", e);
       return null;
     }
   };
 
-  // ------------------ PEER ---------------------
-  const createPeer = (initiator: boolean, stream: MediaStream) => {
-    if (peerRef.current) {
-      log.warn("⚠️ Peer already exists; reusing existing instance.");
-      return peerRef.current;
-    }
+  /* -----------------------------------------------------------
+     Create Peer
+  ----------------------------------------------------------- */
+  const createPeer = (initiator: boolean, local: MediaStream) => {
+    if (peerRef.current) return peerRef.current;
 
-    log.info("🛠 Creating peer", { initiator }, initiator ? "(CALLER)" : "(RECEIVER)");
     setStatus("connecting");
-
-    const ICE_SERVERS = [
-      { urls: "stun:stun.l.google.com:19302" },
-      {
-        urls: "turn:openrelay.metered.ca:443",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-      {
-        urls: "turn:relay1.expressturn.com:3478",
-        username: "efBnwpMNpiPqfMp1eG",
-        credential: "lo1Q2M28tQerNmuT",
-      },
-    ];
 
     const p = new SimplePeer({
       initiator,
       trickle: false,
-      stream,
+      stream: local,
       config: { iceServers: ICE_SERVERS },
     });
 
-    // Debug ICE state
-    try {
-      (p as any).on?.("iceStateChange", (state: any) => log.info("❄ ICE State:", state));
-      (p as any)._pc &&
-        ((p as any)._pc.oniceconnectionstatechange = () =>
-          log.info("🔥 native ICE conn state:", (p as any)._pc.iceConnectionState));
-    } catch (e) { }
-
-    // Signal event
-    p.on("signal", async (data: any) => {
-      log.info(initiator ? "📡 CALLER SENDING OFFER" : "📡 RECEIVER SENDING ANSWER", {
-        type: data?.type ?? "unknown",
-      });
-      await dbInsertSignal(data);
+    p.on("signal", async (s: any) => {
+      console.log("signal -> send to DB", { initiator, sType: s?.type });
+      await insertSignalRow(s);
     });
 
-    // Remote stream
-    p.on("stream", (remote: MediaStream) => {
-      log.info("🎥 Remote stream received");
-      setRemoteStream(remote);
+    p.on("stream", (stream: MediaStream) => {
+      console.log("got remote stream");
+      setRemoteStream(stream);
+
       if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = remote;
-        remoteVideoRef.current.onloadedmetadata = () =>
-          remoteVideoRef.current?.play().catch(() => { });
+        remoteVideoRef.current.srcObject = stream;
+        remoteVideoRef.current.play().catch(() => {});
       }
     });
 
     p.on("connect", () => {
-      log.info("🔗 WebRTC fully connected");
+      console.log("peer connect");
       setStatus("connected");
-      startTimer();
-      setTimeout(() => {
-        if (remoteVideoRef.current && remoteStream) {
-          remoteVideoRef.current.srcObject = remoteStream;
-          remoteVideoRef.current.play().catch(() => { });
-        }
-      }, 300);
     });
 
     p.on("close", () => {
-      log.warn("🔚 Peer connection closed");
+      console.log("peer closed");
       setStatus("idle");
-      stopTimer();
     });
 
-    p.on("error", (err: any) => {
-      log.error("❌ Peer error", err);
+    p.on("error", (err) => {
+      console.error("peer error", err);
       setStatus("error");
     });
 
@@ -215,149 +166,133 @@ const VideoCall: React.FC<VideoCallProps> = ({
     return p;
   };
 
-  // ------------------ POLLING ---------------------
-  const startPollForSignalType = (wantedSignalType: "offer" | "answer", stream: MediaStream) => {
-    if (pollIntervalRef.current) return;
-    pollAttemptsRef.current = 0;
-
-    log.info("🔁 Starting polling fallback for", wantedSignalType);
-
-    pollIntervalRef.current = window.setInterval(async () => {
-      pollAttemptsRef.current++;
-      log.info("🔎 Poll attempt", pollAttemptsRef.current);
-
-      try {
-        const { data: rows, error } = await supabase
-          .from("call_signals")
-          .select("*")
-          .eq("chat_room_id", chatRoomId)
-          .filter("signal->>type", "eq", wantedSignalType)
-          .order("created_at", { ascending: false })
-          .limit(5);
-
-        if (error) log.error("❌ Poll supabase error:", error);
-        if (rows?.length) {
-          for (const r of rows) {
-            log.info("🔎 Inspect row:", r.id, r.signal?.type);
-            if (r.signal && r.signal.type === wantedSignalType) {
-              log.info(`📩 Found ${wantedSignalType.toUpperCase()} in DB via polling`);
-              if (!peerRef.current) createPeer(wantedSignalType === "offer" ? false : true, stream);
-              try {
-                peerRef.current?.signal(r.signal);
-                log.info("📡 Applied polled signal to peer");
-              } catch (e) {
-                log.error("❌ Failed applying polled signal", e);
-              }
-              stopPollForOffers();
-              return;
-            }
-          }
-        }
-      } catch (e) {
-        log.error("❌ Exception while polling:", e);
+  /* -----------------------------------------------------------
+     Apply incoming signal
+  ----------------------------------------------------------- */
+  const applySignal = (signal: any, local: MediaStream) => {
+    try {
+      if (!peerRef.current) {
+        const isOffer = signal?.type === "offer";
+        createPeer(!isOffer, local);
       }
 
-      if (pollAttemptsRef.current >= POLL_MAX_ATTEMPTS) stopPollForOffers();
-    }, POLL_INTERVAL_MS);
-  };
-
-  const stopPollForOffers = () => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-      log.info("🔁 Polling stopped");
+      setTimeout(() => {
+        try {
+          peerRef.current?.signal(signal);
+        } catch (e) {
+          console.error("failed to apply signal", e);
+        }
+      }, 50);
+    } catch (e) {
+      console.error("applySignal err", e);
     }
   };
 
-  // ------------------ SETUP ---------------------
+  /* -----------------------------------------------------------
+     Setup WebRTC + Supabase
+  ----------------------------------------------------------- */
   useEffect(() => {
-    let signalChannel: any = null;
+    let mounted = true;
 
     const setup = async () => {
-      log.info("🚀 Setting up WebRTC (full flow)");
-      const stream = await startLocalCamera();
-
-      if (isCaller) createPeer(true, stream);
-
       try {
-        signalChannel = supabase
-          .channel(`rtc-${chatRoomId}-${currentUserId}`)
-          .on(
-            "postgres_changes",
-            {
-              event: "INSERT",
-              schema: "public",
-              table: "call_signals",
-              filter: `chat_room_id=eq.${chatRoomId}&receiver_id=eq.${currentUserId}`,
-            },
-            async (payload: any) => {
-              const row = payload.new;
-              if (!row?.signal) return;
+        const local = await startLocalCamera();
 
-              const signalObj = row.signal;
-              if (signalObj.type === "offer" && isReceiver) {
-                if (!peerRef.current) createPeer(false, stream);
-                peerRef.current?.signal(signalObj);
-                stopPollForOffers();
-                return;
-              }
+        // Caller initiates immediately
+        if (isCaller) {
+          createPeer(true, local);
+        }
 
-              if (signalObj.type === "answer" && isCaller) {
-                peerRef.current?.signal(signalObj);
-                stopPollForOffers();
-                return;
-              }
+        // Subscribe to Supabase inserts
+        const channel = supabase
+          .from("call_signals")
+          .on("INSERT", (payload) => {
+            const row = payload.new;
 
-              peerRef.current?.signal(signalObj);
-            }
-          )
+            if (!row || row.chat_room_id !== chatRoomId) return;
+            if (row.sender_id === currentUserId) return;
+
+            const signal = row.signal;
+            if (!signal) return;
+
+            if (signal.type === "offer" && isReceiver)
+              return applySignal(signal, local);
+
+            if (signal.type === "answer" && isCaller)
+              return applySignal(signal, local);
+
+            applySignal(signal, local);
+          })
           .subscribe();
 
-        if (isReceiver) setTimeout(() => !peerRef.current && startPollForSignalType("offer", stream), 1500);
-        if (isCaller) setTimeout(() => !peerRef.current && startPollForSignalType("answer", stream), 1500);
+        subRef.current = channel;
       } catch (e) {
-        log.error("❌ subscription error:", e);
-        if (isReceiver) startPollForSignalType("offer", stream);
-        if (isCaller) startPollForSignalType("answer", stream);
+        console.error("setup error", e);
       }
     };
 
-    setup().catch((e) => log.error("❌ Setup failed:", e));
+    setup();
 
     return () => {
-      peerRef.current?.destroy();
-      stopTimer();
-      stopPollForOffers();
-      if (signalChannel) supabase.removeChannel(signalChannel);
-      localVideoRef.current?.srcObject &&
-        (localVideoRef.current.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
+      mounted = false;
+
+      try {
+        peerRef.current?.destroy();
+      } catch {}
+
+      peerRef.current = null;
+
+      try {
+        supabase.removeChannel?.(subRef.current);
+      } catch {}
+
+      if (localStream) localStream.getTracks().forEach((t) => t.stop());
+      if (remoteStream) remoteStream.getTracks().forEach((t) => t.stop());
     };
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ------------------ UI CONTROLS ---------------------
+  /* -----------------------------------------------------------
+     Controls
+  ----------------------------------------------------------- */
   const toggleMute = () => {
-    const s = localVideoRef.current?.srcObject as MediaStream | null;
-    if (s) s.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
+    if (!localStream) return;
+    localStream.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
     setMuted((m) => !m);
   };
 
   const toggleCamera = () => {
-    const s = localVideoRef.current?.srcObject as MediaStream | null;
-    if (s) s.getVideoTracks().forEach((t) => (t.enabled = !t.enabled));
+    if (!localStream) return;
+    localStream.getVideoTracks().forEach((t) => (t.enabled = !t.enabled));
     setCameraOn((c) => !c);
   };
 
-  const reconnect = () => window.location.reload();
-
   const endCall = () => {
-    peerRef.current?.destroy();
-    stopTimer();
+    try {
+      peerRef.current?.destroy();
+    } catch {}
+
+    if (localStream) localStream.getTracks().forEach((t) => t.stop());
+    if (remoteStream) remoteStream.getTracks().forEach((t) => t.stop());
+
+    setLocalStream(null);
+    setRemoteStream(null);
+
     onClose();
   };
 
-  // ------------------ UI ---------------------
+  const reconnect = () => {
+    window.location.reload();
+  };
+
+  /* -----------------------------------------------------------
+     UI
+  ----------------------------------------------------------- */
   return (
     <div className="w-full h-full grid grid-cols-12 gap-4 bg-black rounded">
+      
+      {/* Remote Video */}
       <div className="col-span-8 bg-black rounded overflow-hidden relative flex items-center justify-center">
         {remoteStream ? (
           <video
@@ -368,15 +303,17 @@ const VideoCall: React.FC<VideoCallProps> = ({
           />
         ) : (
           <div className="text-white/70 text-center p-4">
-            {status === "connecting" ? "Connecting…" : "Waiting for participant…"}
+            {status === "connecting"
+              ? "Connecting…"
+              : "Waiting for participant…"}
           </div>
         )}
-        <div className="absolute top-4 left-4 text-white bg-white/10 px-2 py-1 rounded text-sm">
-          {status === "connected" ? formatTime(callDuration) : "00:00"}
-        </div>
       </div>
 
+      {/* Sidebar */}
       <div className="col-span-4 p-4 flex flex-col gap-4">
+
+        {/* Local Video */}
         <div className="bg-white/5 rounded p-3 flex-1 flex flex-col items-center">
           <div className="w-full h-48 bg-black rounded overflow-hidden">
             <video
@@ -390,6 +327,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
           <div className="text-white mt-2 text-sm">You</div>
         </div>
 
+        {/* Status + Controls */}
         <div className="bg-white/5 rounded p-3">
           <div className="flex justify-between text-white mb-3">
             <div>Status</div>
@@ -400,22 +338,26 @@ const VideoCall: React.FC<VideoCallProps> = ({
             <Button onClick={toggleMute} className="w-10 h-10 rounded-full">
               {muted ? <MicOff /> : <Mic />}
             </Button>
+
             <Button onClick={toggleCamera} className="w-10 h-10 rounded-full">
               {cameraOn ? <VideoIcon /> : <VideoOff />}
             </Button>
+
             <Button onClick={reconnect} className="w-10 h-10 rounded-full">
               <RefreshCw />
             </Button>
           </div>
         </div>
 
+        {/* End Call */}
         <div className="mt-auto flex justify-center">
           <Button
             onClick={endCall}
             variant="destructive"
             className="rounded-full px-4 py-2"
           >
-            <PhoneOff /> End Call
+            <PhoneOff />
+            End Call
           </Button>
         </div>
       </div>
