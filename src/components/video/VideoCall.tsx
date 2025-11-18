@@ -1,12 +1,11 @@
-// VideoCall.tsx — FINAL FIXED VERSION WITH INSERT LOGS
+// VideoCall.tsx — WITH FULL RECEIVER DEBUGGING
 
 import React, { useEffect, useRef, useState } from "react";
-import SimplePeer from "simple-peer/simplepeer.min.js"; // ✅ Browser build
+import SimplePeer from "simple-peer/simplepeer.min.js";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { PhoneOff, Mic, MicOff, Video as VideoIcon, VideoOff, RefreshCw } from "lucide-react";
 
-// Debug logger
 const log = {
   info: (...m: any[]) => console.log("%c[RTC]", "color:#4ade80;font-weight:bold;", ...m),
   warn: (...m: any[]) => console.warn("%c[RTC]", "color:#facc15;font-weight:bold;", ...m),
@@ -47,7 +46,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const getTargetId = () =>
     currentUserId === callerId ? receiverId : callerId;
 
-  // ------------------ Local Camera ---------------------
+  // ------------------ CAMERA ---------------------
   const startLocalCamera = async () => {
     log.info("🎥 Requesting user media...");
     try {
@@ -60,9 +59,8 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
-        localVideoRef.current.onloadedmetadata = () => {
+        localVideoRef.current.onloadedmetadata = () =>
           localVideoRef.current?.play().catch(() => {});
-        };
       }
 
       log.info("🎥 Local camera ready");
@@ -74,7 +72,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
     }
   };
 
-  // ------------------ Timer ---------------------
+  // ------------------ TIMER ---------------------
   const startTimer = () => {
     if (timerRef.current) return;
     timerRef.current = window.setInterval(
@@ -94,11 +92,18 @@ const VideoCall: React.FC<VideoCallProps> = ({
     return `${m}:${sec}`;
   };
 
-  // ------------------ Create Peer ---------------------
+  // ------------------ PEER ---------------------
   const createPeer = (initiator: boolean, stream: MediaStream) => {
-    if (peerRef.current) return peerRef.current;
+    if (peerRef.current) {
+      log.warn("⚠️ Peer already exists, reusing existing instance.");
+      return peerRef.current;
+    }
 
-    log.info("🛠 Creating peer (initiator = " + initiator + ")");
+    log.info(
+      "🛠 Creating peer",
+      { initiator },
+      initiator ? "(CALLER)" : "(RECEIVER)"
+    );
     setStatus("connecting");
 
     const p = new SimplePeer({
@@ -107,18 +112,17 @@ const VideoCall: React.FC<VideoCallProps> = ({
       stream,
     });
 
-    // --- Send Signal ---
-    p.on("signal", async (data: any) => {
-      log.info("📡 OUTGOING SIGNAL:", data);
+    // ICE STATE DEBUGGING
+    p.on("iceStateChange", (state: any) =>
+      log.info("❄ ICE State:", state)
+    );
 
-      // ✅ ADDED LOG HERE
-      log.info("📨 INSERTING SIGNAL ROW →", {
-        chat_room_id: chatRoomId,
-        caller_id: currentUserId,
-        receiver_id: getTargetId(),
-        type: "webrtc-signal",
-        signalType: data.type,
-      });
+    // SIGNAL EVENT
+    p.on("signal", async (data: any) => {
+      log.info(
+        initiator ? "📡 CALLER SENDING OFFER/ANSWER" : "📡 RECEIVER SENDING ANSWER",
+        data
+      );
 
       try {
         await supabase.from("call_signals").insert({
@@ -128,26 +132,27 @@ const VideoCall: React.FC<VideoCallProps> = ({
           type: "webrtc-signal",
           signal: data,
         });
+
+        log.info("📨 Signal inserted successfully.");
       } catch (e) {
         log.error("❌ Failed to insert signal", e);
       }
     });
 
-    // --- Remote Stream ---
+    // REMOTE STREAM
     p.on("stream", (remote: MediaStream) => {
-      log.info("🎥 Remote stream received");
-      setRemoteStream(remote);
+      log.info("🎥 Remote stream received from peer");
 
+      setRemoteStream(remote);
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = remote;
-        remoteVideoRef.current.onloadedmetadata = () => {
+        remoteVideoRef.current.onloadedmetadata = () =>
           remoteVideoRef.current?.play().catch(() => {});
-        };
       }
     });
 
     p.on("connect", () => {
-      log.info("🔗 WebRTC Connected");
+      log.info("🔗 WebRTC fully connected — streams active");
       setStatus("connected");
       startTimer();
     });
@@ -167,22 +172,31 @@ const VideoCall: React.FC<VideoCallProps> = ({
     return p;
   };
 
-  // ------------------ Setup WebRTC ---------------------
+  // ------------------ SETUP ---------------------
   useEffect(() => {
     let signalChannel: any = null;
 
     const setup = async () => {
       log.info("🚀 Setting up WebRTC");
 
+      log.info("📌 ROLE CHECK:", {
+        currentUserId,
+        callerId,
+        receiverId,
+        isCaller: currentUserId === callerId,
+        isReceiver: currentUserId === receiverId,
+      });
+
       const stream = await startLocalCamera();
 
       if (currentUserId === callerId) {
-        log.info("📞 Caller → create initiator peer");
+        log.info("📞 Caller → creating OFFER");
         createPeer(true, stream);
       } else {
         log.info("📞 Receiver → waiting for offer...");
       }
 
+      // FIXED FILTER
       signalChannel = supabase
         .channel(`rtc-${chatRoomId}-${currentUserId}`)
         .on(
@@ -191,24 +205,38 @@ const VideoCall: React.FC<VideoCallProps> = ({
             event: "INSERT",
             schema: "public",
             table: "call_signals",
-           filter: `chat_room_id=eq.${chatRoomId}&receiver_id=eq.${currentUserId}`
-
+            filter: `chat_room_id=eq.${chatRoomId}&receiver_id=eq.${currentUserId}`,
           },
           async (payload: any) => {
             const row = payload.new;
-            if (!row || !row.signal) return;
 
-            log.info("📩 INCOMING SIGNAL:", row.signal);
+            log.info("📬 RECEIVED SIGNAL ROW:", row);
+
+            if (!row || !row.signal) {
+              log.warn("⚠️ No signal found in row. Skipping.");
+              return;
+            }
 
             const signal = row.signal;
 
+            log.info("📩 INCOMING SIGNAL:", signal);
+
+            // Receiver creates peer only after receiving offer
             if (!peerRef.current && signal.type === "offer") {
-              log.info("🛠 Receiver creating peer after receiving OFFER");
+              log.info("🛠 Receiver creating peer AFTER OFFER received");
               createPeer(false, stream);
             }
 
-            if (peerRef.current) {
+            if (!peerRef.current) {
+              log.error("❌ peerRef missing. Cannot process signal");
+              return;
+            }
+
+            try {
               peerRef.current.signal(signal);
+              log.info("📡 Signal applied to peer successfully");
+            } catch (e) {
+              log.error("❌ Failed applying signal to peer", e);
             }
           }
         )
@@ -218,7 +246,8 @@ const VideoCall: React.FC<VideoCallProps> = ({
     setup().catch((e) => log.error("❌ Setup failed:", e));
 
     return () => {
-      log.warn("🗑 Cleaning up WebRTC");
+      log.warn("🗑 Cleaning up WebRTC session");
+
       peerRef.current?.destroy();
       stopTimer();
       if (signalChannel) supabase.removeChannel(signalChannel);
@@ -229,7 +258,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
     };
   }, []);
 
-  // ------------------ UI Controls ---------------------
+  // ------------------ UI CONTROLS ---------------------
   const toggleMute = () => {
     const s = localVideoRef.current?.srcObject as MediaStream | null;
     if (s) s.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
@@ -244,7 +273,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
   const reconnect = () => window.location.reload();
 
-  const endCall = async () => {
+  const endCall = () => {
     peerRef.current?.destroy();
     stopTimer();
     onClose();
@@ -258,9 +287,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
           <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
         ) : (
           <div className="text-white/70 text-center p-4">
-            {status === "connecting"
-              ? "Connecting…"
-              : "Waiting for participant…"}
+            {status === "connecting" ? "Connecting…" : "Waiting for participant…"}
           </div>
         )}
 
