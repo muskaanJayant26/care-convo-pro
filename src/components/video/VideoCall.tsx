@@ -1,8 +1,7 @@
-// VideoCall.tsx — FINAL FIXED VERSION
-// Includes SimplePeer Browser Build, fixed filters, correct signal ordering, full logging
+// VideoCall.tsx — FINAL FIXED VERSION WITH INSERT LOGS
 
 import React, { useEffect, useRef, useState } from "react";
-import SimplePeer from "simple-peer/simplepeer.min.js"; // ✅ FIXED: Use browser build
+import SimplePeer from "simple-peer/simplepeer.min.js"; // ✅ Browser build
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { PhoneOff, Mic, MicOff, Video as VideoIcon, VideoOff, RefreshCw } from "lucide-react";
@@ -112,6 +111,15 @@ const VideoCall: React.FC<VideoCallProps> = ({
     p.on("signal", async (data: any) => {
       log.info("📡 OUTGOING SIGNAL:", data);
 
+      // ✅ ADDED LOG HERE
+      log.info("📨 INSERTING SIGNAL ROW →", {
+        chat_room_id: chatRoomId,
+        caller_id: currentUserId,
+        receiver_id: getTargetId(),
+        type: "webrtc-signal",
+        signalType: data.type,
+      });
+
       try {
         await supabase.from("call_signals").insert({
           chat_room_id: chatRoomId,
@@ -125,11 +133,11 @@ const VideoCall: React.FC<VideoCallProps> = ({
       }
     });
 
-    // --- Got Remote Stream ---
+    // --- Remote Stream ---
     p.on("stream", (remote: MediaStream) => {
       log.info("🎥 Remote stream received");
-
       setRemoteStream(remote);
+
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = remote;
         remoteVideoRef.current.onloadedmetadata = () => {
@@ -168,7 +176,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
       const stream = await startLocalCamera();
 
-      // Caller immediately creates peer
       if (currentUserId === callerId) {
         log.info("📞 Caller → create initiator peer");
         createPeer(true, stream);
@@ -176,7 +183,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
         log.info("📞 Receiver → waiting for offer...");
       }
 
-      // Subscribe ONLY to signals meant for the current user
       signalChannel = supabase
         .channel(`rtc-${chatRoomId}-${currentUserId}`)
         .on(
@@ -195,7 +201,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
             const signal = row.signal;
 
-            // Receiver creates peer only when OFFER arrives
             if (!peerRef.current && signal.type === "offer") {
               log.info("🛠 Receiver creating peer after receiving OFFER");
               createPeer(false, stream);
@@ -209,9 +214,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
         .subscribe();
     };
 
-    setup().catch((e) => {
-      log.error("❌ Setup failed:", e);
-    });
+    setup().catch((e) => log.error("❌ Setup failed:", e));
 
     return () => {
       log.warn("🗑 Cleaning up WebRTC");
@@ -219,7 +222,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
       stopTimer();
       if (signalChannel) supabase.removeChannel(signalChannel);
 
-      // Stop camera
       (localVideoRef.current?.srcObject as MediaStream | null)
         ?.getTracks()
         .forEach((t) => t.stop());
