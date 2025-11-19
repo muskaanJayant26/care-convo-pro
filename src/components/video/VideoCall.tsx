@@ -21,8 +21,6 @@ const ICE_SERVERS = [
   },
 ];
 
-
-
 const log = (msg: string, ...rest: any[]) =>
   console.log("%c[VIDEO CALL] " + msg, "color:#60a5fa;font-weight:bold", ...rest);
 const err = (msg: string, ...rest: any[]) =>
@@ -123,17 +121,22 @@ const VideoCall: React.FC<Props> = ({
     peerRef.current = peer;
 
     // After creation → flush pending signals
-    setTimeout(() => {
-      if (pendingSignals.current.length > 0) {
-        log("Flushing pending signals", pendingSignals.current);
-        pendingSignals.current.forEach((s) => peer.signal(s));
-        pendingSignals.current = [];
-      }
-    }, 30);
+  const tryFlushSignals = () => {
+  if (!peerRef.current) return;
+  if (!localStreamRef.current) return;
+  if (pendingSignals.current.length === 0) return;
 
+  log("Flushing pending signals", pendingSignals.current);
+
+  pendingSignals.current.forEach((s) => peerRef.current!.signal(s));
+  pendingSignals.current = [];
+};
     return peer;
   };
 
+  setTimeout(() => {
+  tryFlushSignals();
+}, 100);
   // ------------------------------------------------------
   // APPLY INCOMING SIGNAL
   // ------------------------------------------------------
@@ -146,17 +149,18 @@ const VideoCall: React.FC<Props> = ({
     const peer = peerRef.current;
 
     // Receiver first receives OFFER → create peer
-    if (type === "call-offer") {
-      log("Received OFFER → ensure peer and apply offer");
+  if (type === "call-offer") {
+  if (!localStreamRef.current) {
+    log("Stream not ready — delaying offer");
+    pendingSignals.current.push(signal);
+    return;
+  }
 
-      if (!peer) {
-        createPeer(false);
-        pendingSignals.current.push(signal); // store until peer ready
-      } else {
-        peer.signal(signal);
-      }
-      return;
-    }
+  if (!peer) createPeer(false);
+
+  peer.signal(signal);
+  return;
+}
 
     // Caller receives ANSWER
     if (type === "call-answer") {
@@ -198,9 +202,15 @@ const VideoCall: React.FC<Props> = ({
       }
 
       // Caller immediately creates peer
-      if (isCaller) {
-        createPeer(true);
-      }
+   // Wait until stream is ready before creating peer
+await navigator.mediaDevices.getUserMedia({...});
+localStreamRef.current = stream;
+
+// NOW allow creating caller peer
+if (isCaller) {
+  log("Caller creating peer AFTER media stream ready");
+  createPeer(true);
+}
 
       // Realtime subscription
       const channel = supabase
