@@ -86,6 +86,7 @@ const VideoCall: React.FC<Props> = ({ chatRoomId, callerId, receiverId, currentU
           .channel(`webrtc-${chatRoomId}`)
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_signals' }, (payload: any) => {
             const row = payload.new as any;
+            console.log("🔥 NEW SIGNAL ROW:", payload.new);
 
             // only process rows for our chat room
             if (!row || row.chat_room_id !== chatRoomId) return;
@@ -139,6 +140,7 @@ const VideoCall: React.FC<Props> = ({ chatRoomId, callerId, receiverId, currentU
     peer.on('signal', async (signalData: any) => {
       log('peer signal emitted');
       // insert the signal to supabase
+      console.log("signal data",signalData)
       await insertSignal(chatRoomId, callerId, receiverId, currentUserId, signalData);
     });
 
