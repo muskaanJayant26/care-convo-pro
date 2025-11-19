@@ -230,7 +230,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       setCallDuration(0);
 
       // insert call offer into call_signals; receiver will see this
-      await supabase.from('call_signals').insert({ chat_room_id: chatRoomId, caller_id: currentUserId, receiver_id: otherUserId, type: 'call-offer' });
+await supabase.from('call_signals').insert({
+  chat_room_id: chatRoomId,
+  caller_id: currentUserId,
+  receiver_id: otherUserId,
+  sender_id: currentUserId,
+  type: 'call-offer'
+});
+
 
       toast({ title: 'Calling', description: `Ringing ${otherUserName}...` });
     } catch (err) {
@@ -247,7 +254,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     try {
       stopRingtone();
       // insert accepted signal
-      await supabase.from('call_signals').insert({ chat_room_id: chatRoomId, caller_id: incomingCall.caller_id, receiver_id: incomingCall.receiver_id, type: 'call-accepted' });
+     await supabase.from('call_signals').insert({
+  chat_room_id: chatRoomId,
+  caller_id: incomingCall.caller_id,
+  receiver_id: incomingCall.receiver_id,
+  sender_id: currentUserId,
+  type: 'call-accepted'
+});
+
       // set activeCall for the local client (show VideoCall)
       setActiveCall({ caller_id: incomingCall.caller_id, receiver_id: incomingCall.receiver_id, chat_room_id: chatRoomId });
       setIncomingCall(null);
