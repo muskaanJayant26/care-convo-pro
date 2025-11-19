@@ -268,29 +268,35 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
         LOG("Subscribing to Supabase Realtime...");
 
-        const channel = supabase
-          .channel(`webrtc-${chatRoomId}`)
-          .on(
-            "postgres_changes",
-            {
-              event: "INSERT",
-              schema: "public",
-              table: "call_signals",
-              filter: `chat_room_id=eq.${chatRoomId}`,
-            },
-            (payload: any) => {
-              DB_LOG("Realtime CALLBACK triggered:", payload);
+     const channel = supabase
+  .channel(`webrtc-${chatRoomId}`)
+  .on(
+    "postgres_changes",
+    {
+      event: "INSERT",
+      schema: "public",
+      table: "call_signals",
+    },
+    (payload: any) => {
+      DB_LOG("Realtime CALLBACK triggered:", payload);
 
-              if (payload.new.sender_id === currentUserId) {
-                DB_LOG("Ignoring own signal");
-                return;
-              }
+      if (payload.new.chat_room_id !== chatRoomId) {
+        DB_LOG("Ignoring signal from other room");
+        return;
+      }
 
-              const signal = extractSignalFromRow(payload.new);
-              applySignal(signal);
-            }
-          )
-          .subscribe((status) => LOG("Supabase subscription status:", status));
+      if (payload.new.sender_id === currentUserId) {
+        DB_LOG("Ignoring own signal");
+        return;
+      }
+
+      const signal = extractSignalFromRow(payload.new);
+      applySignal(signal);
+    }
+  )
+  .subscribe();
+
+
 
         channelRef.current = channel;
       } catch (e) {
