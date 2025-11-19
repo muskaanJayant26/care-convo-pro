@@ -1,34 +1,34 @@
 // VideoCall.tsx
-import React, { useEffect, useRef, useState } from 'react';
-import SimplePeer from 'simple-peer/simplepeer.min.js';
-import { supabase } from '@/integrations/supabase/client';
-import { Button } from '@/components/ui/button';
-import { PhoneOff, Mic, MicOff, Video as VideoIcon, VideoOff, RefreshCw } from 'lucide-react';
-
-/**
- * Option A — Simple, robust VideoCall component with verbose logging
- *
- * Requirements:
- *  - Table `call_signals` with columns at least:
- *      chat_room_id, caller_id, receiver_id, sender_id, type (webrtc-signal), signal
- *  - Signaling rows inserted by peer 'signal' handler (this file uses insertSignal())
- *
- * Behavior:
- *  - Caller creates peer as initiator when local camera ready
- *  - Receiver waits for incoming offer rows, creates non-initiator peer and applies offer
- *  - All signals (offer/answer/candidate) are inserted in call_signals by insertSignal()
- *  - Incoming rows are parsed (JSON.parse if string) before feeding into peer.signal()
- */
+import React, { useEffect, useRef, useState } from "react";
+import SimplePeer from "simple-peer/simplepeer.min.js";
+import { supabase } from "@/integrations/supabase/client";
+import { Button } from "@/components/ui/button";
+import {
+  PhoneOff,
+  Mic,
+  MicOff,
+  Video as VideoIcon,
+  VideoOff,
+  RefreshCw,
+} from "lucide-react";
 
 const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'turn:global.relay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: "stun:stun.l.google.com:19302" },
+  {
+    urls: "turn:global.relay.metered.ca:80",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
 ];
 
-const LOG = (m: string, ...rest: any[]) => console.log('%c[VIDEO CALL] ' + m, 'color:#60a5fa;font-weight:bold', ...rest);
-const SIGNAL_LOG = (m: string, ...rest: any[]) => console.log('%c[SIGNAL] ' + m, 'color:#7dd3fc;font-weight:600', ...rest);
-const ERROR_LOG = (m: string, ...rest: any[]) => console.error('%c[VIDEO CALL ERROR] ' + m, 'color:#f87171;font-weight:bold', ...rest);
-const DB_LOG = (m: string, ...rest: any[]) => console.log('%c[DB] ' + m, 'color:#facc15;font-weight:600', ...rest);
+const log = (msg: string, ...rest: any[]) =>
+  console.log("%c[VIDEO CALL] " + msg, "color:#60a5fa;font-weight:bold", ...rest);
+const err = (msg: string, ...rest: any[]) =>
+  console.error(
+    "%c[VIDEO CALL] " + msg,
+    "color:#f87171;font-weight:bold",
+    ...rest
+  );
 
 interface Props {
   chatRoomId: string;
@@ -38,352 +38,233 @@ interface Props {
   onClose: () => void;
 }
 
-const insertSignal = async (
-  chatRoomId: string,
-  callerId: string,
-  receiverId: string,
-  senderId: string,
-  signal: any
-) => {
-  try {
-    DB_LOG('insertSignal -> inserting row', { chatRoomId, senderId, type: 'webrtc-signal' });
-    const payload = {
-      chat_room_id: chatRoomId,
-      caller_id: callerId,
-      receiver_id: receiverId,
-      sender_id: senderId,
-      type: 'webrtc-signal',
-      signal,
-    };
-    const { data, error } = await supabase.from('call_signals').insert([payload]).select().single();
-    if (error) {
-      ERROR_LOG('insertSignal DB error', error);
-      return null;
-    }
-    DB_LOG('insertSignal success', data);
-    return data;
-  } catch (e) {
-    ERROR_LOG('insertSignal exception', e);
-    return null;
-  }
-};
+const VideoCall: React.FC<Props> = ({
+  chatRoomId,
+  callerId,
+  receiverId,
+  currentUserId,
+  onClose,
+}) => {
+  const isCaller = currentUserId === callerId;
 
-const VideoCall: React.FC<Props> = ({ chatRoomId, callerId, receiverId, currentUserId, onClose }) => {
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerRef = useRef<SimplePeer.Instance | null>(null);
   const channelRef = useRef<any>(null);
 
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [muted, setMuted] = useState(false);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  const [connected, setConnected] = useState(false);
   const [cameraOn, setCameraOn] = useState(true);
-  const [status, setStatus] = useState<'idle' | 'starting' | 'connecting' | 'connected' | 'error'>('idle');
+  const [micOn, setMicOn] = useState(true);
 
-  const isCaller = currentUserId === callerId;
-  LOG(`mount`, { chatRoomId, callerId, receiverId, currentUserId, isCaller });
+  // ------------------------------------------------------
+  // INSERT SIGNAL TO SUPABASE
+  // ------------------------------------------------------
+  const sendSignal = async (
+    type: "call-offer" | "call-answer" | "webrtc-signal",
+    signal: any
+  ) => {
+    log("Inserting signal", { type, signal });
 
-  // start local camera
-  const startLocalCamera = async () => {
-    setStatus('starting');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      LOG('Local media acquired', stream);
-      setLocalStream(stream);
+    const { error } = await supabase.from("call_signals").insert({
+      chat_room_id: chatRoomId,
+      caller_id: callerId,
+      receiver_id: receiverId,
+      sender_id: currentUserId,
+      type,
+      signal,
+    });
 
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.muted = true;
-        localVideoRef.current.playsInline = true;
-        localVideoRef.current.play().catch(() => {});
-      }
-      return stream;
-    } catch (e) {
-      ERROR_LOG('getUserMedia failed', e);
-      setStatus('error');
-      throw e;
-    }
+    if (error) err("insert signal error", error);
   };
 
-  // create peer (initiator = true for caller)
-  const createPeer = (initiator: boolean, local: MediaStream) => {
-    LOG('createPeer', { initiator });
-    if (peerRef.current) {
-      LOG('peer already exists -> reusing');
-      return peerRef.current;
-    }
+  // ------------------------------------------------------
+  // CREATE PEER
+  // ------------------------------------------------------
+  const createPeer = (initiator: boolean) => {
+    log("createPeer()", { initiator });
 
-    setStatus('connecting');
-
+    const stream = localStreamRef.current!;
     const peer = new SimplePeer({
       initiator,
       trickle: true,
-      stream: local,
+      stream,
       config: { iceServers: ICE_SERVERS },
     });
 
-    peer.on('signal', async (signalData: any) => {
-      SIGNAL_LOG('local peer signal emitted', signalData && signalData.type ? signalData.type : typeof signalData);
-      // Always send the raw object; don't stringify here — DB stores JSON object (your DB can accept JSON)
-      // If your DB stores strings, insertSignal will still work — Supabase will accept JS object and convert.
-      await insertSignal(chatRoomId, callerId, receiverId, currentUserId, signalData);
+    peer.on("signal", (data: any) => {
+      log("peer emitted signal:", data);
+
+      if (data.type === "offer") {
+        sendSignal("call-offer", data);
+      } else if (data.type === "answer") {
+        sendSignal("call-answer", data);
+      } else {
+        sendSignal("webrtc-signal", data);
+      }
     });
 
-    peer.on('stream', (stream: MediaStream) => {
-      LOG('remote stream received');
-      setRemoteStream(stream);
-      setTimeout(() => {
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = stream;
-          remoteVideoRef.current.playsInline = true;
-          remoteVideoRef.current.play().catch(() => {});
-        }
-      }, 50);
+    peer.on("stream", (remoteStream) => {
+      log("remote stream received");
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remoteStream;
+        remoteVideoRef.current.play().catch(() => {});
+      }
     });
 
-    peer.on('connect', () => {
-      LOG('peer connected');
-      setStatus('connected');
+    peer.on("connect", () => {
+      log("peer connected!");
+      setConnected(true);
     });
 
-    peer.on('close', () => {
-      LOG('peer closed');
-      setStatus('idle');
-      onClose();
-    });
+    peer.on("error", (e) => err("peer error", e));
 
-    peer.on('error', (e: any) => {
-      ERROR_LOG('peer error', e);
-      setStatus('error');
-    });
+    peer.on("close", () => log("peer closed"));
 
     peerRef.current = peer;
-    return peer;
   };
 
-  // parse incoming signal robustly (handles stringified JSON or object)
-  const normalizeSignal = (rawSignal: any) => {
-    if (rawSignal == null) return null;
-    if (typeof rawSignal === 'object') return rawSignal;
-    if (typeof rawSignal === 'string') {
-      try {
-        return JSON.parse(rawSignal);
-      } catch (e) {
-        // Some DBs store escaped quoted JSON or double-encoded; try one more attempt (strip quotes)
-        try {
-          const stripped = rawSignal.replace(/^"(.+)"$/, '$1').replace(/\\"/g, '"');
-          return JSON.parse(stripped);
-        } catch (ee) {
-          ERROR_LOG('Failed to parse signal string', ee, rawSignal);
-          return null;
-        }
-      }
-    }
-    ERROR_LOG('Unknown signal type', typeof rawSignal, rawSignal);
-    return null;
-  };
+  // ------------------------------------------------------
+  // APPLY INCOMING SIGNAL
+  // ------------------------------------------------------
+  const applyIncomingSignal = async (row: any) => {
+    log("applyIncomingSignal row", row);
 
-  // incoming signal handler: apply to peer (create peer if not present)
-  const applySignal = (rawSignal: any) => {
-    const signal = normalizeSignal(rawSignal);
-    SIGNAL_LOG('applySignal received', signal && signal.type ? signal.type : typeof signal);
+    const { type, signal, sender_id } = row;
+    if (sender_id === currentUserId) return; // ignore own signal
 
-    if (!signal) {
-      ERROR_LOG('applySignal: no usable signal');
+    // receiver receives OFFER → create peer & answer
+    if (type === "call-offer" && !peerRef.current) {
+      log("Received OFFER → creating peer (non-initiator)");
+      createPeer(false);
+      peerRef.current!.signal(signal);
       return;
     }
 
-    // if peer doesn't exist yet, create non-initiator peer (receiver side)
-    if (!peerRef.current) {
-      if (!localStream) {
-        ERROR_LOG('No local stream yet - cannot create peer to apply incoming signal. Signal queued?');
-        return;
-      }
-      LOG('Peer missing - creating non-initiator peer to apply incoming signal');
-      createPeer(false, localStream);
+    // caller receives ANSWER
+    if (type === "call-answer") {
+      log("Received ANSWER → applying");
+      peerRef.current?.signal(signal);
+      return;
     }
 
-    try {
+    // both sides exchange ICE candidates
+    if (type === "webrtc-signal") {
+      log("Received ICE candidate → applying");
       peerRef.current?.signal(signal);
-      SIGNAL_LOG('signal applied to peer');
-    } catch (e) {
-      ERROR_LOG('Error applying signal to peer', e);
+      return;
     }
   };
 
-  // setup on mount: start camera, create peer (if caller), subscribe to supabase
+  // ------------------------------------------------------
+  // INITIAL MOUNT
+  // ------------------------------------------------------
   useEffect(() => {
-    let mounted = true;
-    LOG('setup start');
+    log("mount", { chatRoomId, callerId, receiverId, currentUserId });
 
-    const init = async () => {
-      try {
-        const local = await startLocalCamera();
-        if (!mounted) return;
+    (async () => {
+      // get user media
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
 
-        // If user is caller, create peer right away as initiator.
-        if (isCaller) {
-          LOG('User is caller -> creating initiator peer');
-          createPeer(true, local);
-        } else {
-          LOG('User is receiver -> waiting for incoming offer');
-        }
-
-        // Subscribe to call_signals table for our chat_room_id
-        // We also check chat_room_id server-side via filter to reduce traffic:
-        const chan = supabase
-          .channel(`webrtc-${chatRoomId}`)
-          .on(
-            'postgres_changes',
-            {
-              event: 'INSERT',
-              schema: 'public',
-              table: 'call_signals',
-              filter: `chat_room_id=eq.${chatRoomId}`, // Supabase will filter for this chat room
-            },
-            (payload: any) => {
-              DB_LOG('Realtime callback', payload?.new?.id ?? 'no-id', payload?.new?.type);
-              const row = payload.new as any;
-              if (!row) return;
-
-              // ignore rows that are not the webrtc-signal type (other types may be call-offer/accepted – keep those to ChatInterface)
-              if (row.type !== 'webrtc-signal') {
-                DB_LOG('Ignoring non-webrtc-signal row in VideoCall', row.type);
-                return;
-              }
-
-              // ignore our own signals (we inserted them)
-              if (row.sender_id === currentUserId) {
-                DB_LOG('Ignoring own inserted signal row', row.id);
-                return;
-              }
-
-              // row.signal may be object or stringified - normalize
-              const incomingSignal = row.signal ?? null;
-              if (!incomingSignal) {
-                DB_LOG('Signal payload empty - ignoring', row.id);
-                return;
-              }
-
-              SIGNAL_LOG('Incoming signal row', { id: row.id, sender_id: row.sender_id, signalType: typeof incomingSignal });
-
-              // If this is an offer and this client is receiver, ensure we create peer as non-initiator before applying.
-              // If it's an answer and we're the caller, peer likely exists; apply it normally.
-              applySignal(incomingSignal);
-            }
-          )
-          .subscribe((status) => {
-            LOG('Supabase subscribe status', status);
-          });
-
-        channelRef.current = chan;
-        LOG('Subscribed to supabase channel', { channelId: `webrtc-${chatRoomId}` });
-      } catch (e) {
-        ERROR_LOG('init failed', e);
-        setStatus('error');
+      localStreamRef.current = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.muted = true;
+        localVideoRef.current.play().catch(() => {});
       }
-    };
 
-    init();
+      // caller creates peer immediately
+      if (isCaller) {
+        createPeer(true);
+      }
+
+      // Realtime subscription
+      const channel = supabase
+        .channel("webrtc-" + chatRoomId)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "call_signals",
+            filter: `chat_room_id=eq.${chatRoomId}`,
+          },
+          (payload) => {
+            log("🔥 realtime payload", payload.new);
+            applyIncomingSignal(payload.new);
+          }
+        )
+        .subscribe((status) => log("subscribe status:", status));
+
+      channelRef.current = channel;
+    })();
 
     return () => {
-      mounted = false;
-      LOG('cleanup');
-      try {
-        peerRef.current?.destroy();
-      } catch (e) {
-        ERROR_LOG('Error destroying peer', e);
-      }
-      try {
-        if (localStream) localStream.getTracks().forEach((t) => t.stop());
-      } catch {}
-      try {
-        if (remoteStream) remoteStream.getTracks().forEach((t) => t.stop());
-      } catch {}
-      try {
-        if (channelRef.current) {
-          LOG('Removing supabase channel');
-          supabase.removeChannel(channelRef.current);
-        }
-      } catch (e) {
-        ERROR_LOG('removeChannel failed', e);
-      }
+      log("cleanup");
+      peerRef.current?.destroy();
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      if (channelRef.current) supabase.removeChannel(channelRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // controls
-  const toggleMute = () => {
-    if (!localStream) return;
-    localStream.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
-    setMuted((v) => !v);
+  // ------------------------------------------------------
+  // UI BUTTON HANDLERS
+  // ------------------------------------------------------
+  const toggleMic = () => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    stream.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
+    setMicOn((v) => !v);
   };
 
   const toggleCamera = () => {
-    if (!localStream) return;
-    localStream.getVideoTracks().forEach((t) => (t.enabled = !t.enabled));
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    stream.getVideoTracks().forEach((t) => (t.enabled = !t.enabled));
     setCameraOn((v) => !v);
   };
 
-  const endCall = async () => {
-    LOG('endCall - user requested');
-    try {
-      peerRef.current?.destroy();
-    } catch (e) {
-      ERROR_LOG('Error destroying peer on endCall', e);
-    }
-    try {
-      if (localStream) localStream.getTracks().forEach((t) => t.stop());
-      if (remoteStream) remoteStream.getTracks().forEach((t) => t.stop());
-    } catch (e) {
-      ERROR_LOG('Error stopping tracks on endCall', e);
-    }
-
-    try {
-      if (channelRef.current) {
-        LOG('Removing supabase channel on endCall');
-        supabase.removeChannel(channelRef.current);
-      }
-    } catch (e) {
-      ERROR_LOG('Error removing channel on endCall', e);
-    }
-
+  const endCall = () => {
+    peerRef.current?.destroy();
     onClose();
   };
 
-  const reconnect = () => {
-    LOG('reconnect requested -> reload page');
-    window.location.reload();
-  };
-
   return (
-    <div className="w-full h-full grid grid-cols-12 gap-4 bg-black rounded">
-      <div className="col-span-8 bg-black rounded overflow-hidden relative flex items-center justify-center">
-        {remoteStream ? (
-          <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
-        ) : (
-          <div className="text-white/70">{status === 'connecting' ? 'Connecting…' : 'Waiting…'}</div>
-        )}
+    <div className="grid grid-cols-12 gap-4 w-full h-full bg-black p-4 rounded">
+      {/* Remote Video */}
+      <div className="col-span-8 bg-black flex items-center justify-center rounded relative">
+        <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
       </div>
 
-      <div className="col-span-4 p-4 flex flex-col gap-4">
-        <div className="bg-white/5 rounded p-3 flex-1 flex flex-col items-center">
-          <div className="w-full h-48 bg-black rounded overflow-hidden">
-            <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+      {/* Controls + Local Video */}
+      <div className="col-span-4 flex flex-col gap-4">
+        <div className="bg-white/5 rounded p-3 flex flex-col items-center">
+          <div className="w-full h-48 bg-black rounded mb-2 overflow-hidden">
+            <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
           </div>
-          <div className="text-white mt-2 text-sm">You ({status})</div>
+          <div className="text-white text-sm">{connected ? "Connected" : "Connecting…"}</div>
         </div>
 
-        <div className="bg-white/5 rounded p-3">
-          <div className="flex justify-center gap-4">
-            <Button onClick={toggleMute} className="w-10 h-10 rounded-full">{muted ? <MicOff /> : <Mic />}</Button>
-            <Button onClick={toggleCamera} className="w-10 h-10 rounded-full">{cameraOn ? <VideoIcon /> : <VideoOff />}</Button>
-            <Button onClick={reconnect} className="w-10 h-10 rounded-full"><RefreshCw /></Button>
-          </div>
+        <div className="bg-white/5 rounded p-4 flex justify-center gap-4">
+          <Button onClick={toggleMic} className="w-10 h-10 rounded-full">
+            {micOn ? <Mic /> : <MicOff />}
+          </Button>
+
+          <Button onClick={toggleCamera} className="w-10 h-10 rounded-full">
+            {cameraOn ? <VideoIcon /> : <VideoOff />}
+          </Button>
+
+          <Button onClick={() => window.location.reload()} className="w-10 h-10 rounded-full">
+            <RefreshCw />
+          </Button>
         </div>
 
-        <div className="mt-auto flex justify-center">
-          <Button onClick={endCall} variant="destructive" className="rounded-full flex items-center gap-2 px-4 py-2">
+        <div className="flex justify-center mt-auto">
+          <Button onClick={endCall} variant="destructive" className="rounded-full flex items-center gap-2 px-6 py-2">
             <PhoneOff /> End Call
           </Button>
         </div>
