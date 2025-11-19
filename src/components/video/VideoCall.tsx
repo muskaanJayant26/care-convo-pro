@@ -1,3 +1,4 @@
+// VideoCall.tsx
 import React, { useEffect, useRef, useState } from "react";
 import SimplePeer from "simple-peer/simplepeer.min.js";
 import { supabase } from "@/integrations/supabase/client";
@@ -12,7 +13,7 @@ import {
 } from "lucide-react";
 
 /* -----------------------------------------------------------
-  VideoCall Props
+  Props
 ----------------------------------------------------------- */
 interface VideoCallProps {
   chatRoomId: string;
@@ -23,21 +24,19 @@ interface VideoCallProps {
 }
 
 /* -----------------------------------------------------------
-  ICE SERVERS
+  ICE SERVERS (keep/extend these as needed)
 ----------------------------------------------------------- */
-const ICE_SERVERS: RTCIceServer[] = [
+const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   {
-    urls: "turn:openrelay.metered.ca:443",
+    urls: "turn:global.relay.metered.ca:80",
     username: "openrelayproject",
     credential: "openrelayproject",
   },
 ];
 
 /* -----------------------------------------------------------
-  Helper: insert signal row into Supabase
-  - store the raw SimplePeer signal in `signal` column
-  - include an optional legacy_type for compatibility (not relied on)
+  Insert a signal row into call_signals (uses `signal` JSONB)
 ----------------------------------------------------------- */
 const insertSignalRow = async (
   chatRoomId: string,
@@ -47,7 +46,6 @@ const insertSignalRow = async (
   signal: any
 ) => {
   try {
-    // Insert the raw SimplePeer object into `signal` column. Keep a legacy `type` tag
     const { data, error } = await supabase
       .from("call_signals")
       .insert([
@@ -56,59 +54,34 @@ const insertSignalRow = async (
           caller_id: callerId,
           receiver_id: receiverId,
           sender_id: senderId,
-          // keep legacy marker but the important bit is `signal`
           type: "webrtc-signal",
           signal,
         },
       ])
       .select();
-
     if (error) {
-      console.error("supabase insert error", error);
+      console.error("insertSignalRow error:", error);
       return null;
     }
     return data?.[0] ?? null;
   } catch (e) {
-    console.error("insertSignalRow exception", e);
+    console.error("insertSignalRow exception:", e);
     return null;
   }
 };
 
 /* -----------------------------------------------------------
-  Helper: extract a usable SimplePeer signal from a DB row
-  - supports multiple legacy wrappers (signal, payload, offer/answer/candidate)
-  - returns null if it can't find a valid candidate/offer/answer object
+  Simple extractor (here we trust `signal` column exists)
+  Add extra parsing if your app stores other shapes later.
 ----------------------------------------------------------- */
 const extractSignalFromRow = (row: any) => {
   if (!row) return null;
-
-  // Common: raw SimplePeer object stored in `signal`
-  if (row.signal && (row.signal.type || row.signal.candidate || row.signal.sdp)) {
-    return row.signal;
-  }
-
-  // Legacy: sometimes users store under `payload` or `data`
-  if (row.payload) {
-    const p = row.payload;
-    if (p.signal && (p.signal.type || p.signal.candidate || p.signal.sdp)) return p.signal;
-    if (p.offer || p.answer || p.candidate) return p.offer || p.answer || p.candidate;
-  }
-
-  // Legacy separation: call-offer / call-accepted etc might store offer/answer in other columns
-  if (row.offer && (row.offer.sdp || row.offer.type)) return row.offer;
-  if (row.answer && (row.answer.sdp || row.answer.type)) return row.answer;
-  if (row.candidate) return { candidate: row.candidate };
-
-  // Last attempt: if the row itself looks like a SimplePeer signal
-  if (row.type && (row.type === "offer" || row.type === "answer") && row.sdp) {
-    return { type: row.type, sdp: row.sdp };
-  }
-
+  if (row.signal) return row.signal;
   return null;
 };
 
 /* -----------------------------------------------------------
-  VideoCall Component (robust signal parsing + logging)
+  Component
 ----------------------------------------------------------- */
 const VideoCall: React.FC<VideoCallProps> = ({
   chatRoomId,
@@ -127,7 +100,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const [muted, setMuted] = useState(false);
   const [cameraOn, setCameraOn] = useState(true);
   const [status, setStatus] = useState<
-    "idle" | "connecting" | "connected" | "error"
+    "idle" | "starting" | "connecting" | "connected" | "error"
   >("idle");
 
   const isCaller = currentUserId === callerId;
@@ -137,22 +110,22 @@ const VideoCall: React.FC<VideoCallProps> = ({
   ----------------------------------------------------------- */
   const startLocalCamera = async () => {
     try {
+      setStatus("starting");
       const s = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
-
       setLocalStream(s);
-
+      // attach to local video element
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = s;
         localVideoRef.current.muted = true;
-        await localVideoRef.current.play().catch(() => {});
+        localVideoRef.current.playsInline = true;
+        localVideoRef.current.play().catch(() => {});
       }
-
       return s;
     } catch (e) {
-      console.error("Failed to getUserMedia", e);
+      console.error("getUserMedia failed", e);
       setStatus("error");
       throw e;
     }
@@ -160,8 +133,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
   /* -----------------------------------------------------------
     Create SimplePeer instance
-    - Only the caller should be initiator=true
-    - Use trickle=true (allows ICE candidates to flow gradually)
   ----------------------------------------------------------- */
   const createPeer = (initiator: boolean, local: MediaStream) => {
     if (peerRef.current) return peerRef.current;
@@ -175,13 +146,8 @@ const VideoCall: React.FC<VideoCallProps> = ({
       config: { iceServers: ICE_SERVERS },
     });
 
-    // DEBUG: expose internal pc state for easier debugging
-    // @ts-ignore
-    p._debug = { pc: (p as any)._pc };
-
     p.on("signal", async (s: any) => {
-      // s can be offer/answer or candidate - store the raw object!
-      console.log("EMIT SIGNAL -> storing to DB", s?.type || s?.candidate ? s : s);
+      // store raw offer/answer/candidate into DB
       try {
         await insertSignalRow(chatRoomId, callerId, receiverId, currentUserId, s);
       } catch (err) {
@@ -190,29 +156,31 @@ const VideoCall: React.FC<VideoCallProps> = ({
     });
 
     p.on("stream", (stream: MediaStream) => {
-      console.log("got remote stream");
       setRemoteStream(stream);
-      // attach safely
+      // attach to remote element safely
       setTimeout(() => {
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = stream;
+          remoteVideoRef.current.playsInline = true;
           remoteVideoRef.current.play().catch(() => {});
         }
       }, 50);
     });
 
     p.on("connect", () => {
-      console.log("peer connect");
+      console.log("Peer connected");
       setStatus("connected");
     });
 
     p.on("close", () => {
-      console.log("peer closed");
+      console.log("Peer closed");
       setStatus("idle");
+      // trigger parent close so UI removes VideoCall overlay
+      onClose();
     });
 
     p.on("error", (err: any) => {
-      console.error("peer error", err);
+      console.error("Peer error:", err);
       setStatus("error");
     });
 
@@ -221,32 +189,39 @@ const VideoCall: React.FC<VideoCallProps> = ({
   };
 
   /* -----------------------------------------------------------
-    Apply incoming signal safely
+    Apply incoming signal
   ----------------------------------------------------------- */
-  const applySignal = (signal: any, local: MediaStream) => {
+  const applySignal = (signal: any) => {
+    if (!signal) return;
     try {
       if (!peerRef.current) {
-        // Create peer using our role (caller true -> initiator true)
-        console.log("Creating peer (on incoming) initiator=", isCaller);
-        createPeer(isCaller, local);
+        // create peer using our role:
+        // caller should already have created peer when opening UI,
+        // but if not, create with `initiator = isCaller`
+        if (!localStream) {
+          console.warn("applySignal called before localStream ready — queued by subscription until local stream ready");
+          return;
+        }
+        createPeer(isCaller, localStream);
       }
-
-      // small delay to avoid race conditions
+      // small delay to avoid race with peer creation
       setTimeout(() => {
         try {
-          console.log("APPLY SIGNAL ->", signal?.type || signal?.candidate ? signal : signal);
           peerRef.current?.signal(signal);
         } catch (e) {
-          console.error("failed to apply signal", e);
+          console.error("Error applying signal to peer:", e);
         }
-      }, 50);
+      }, 20);
     } catch (e) {
-      console.error("applySignal err", e);
+      console.error("applySignal error:", e);
     }
   };
 
   /* -----------------------------------------------------------
-    Setup camera, peer (caller), and Supabase listener
+    Setup on mount:
+      - start local camera
+      - if caller: create peer immediately (initiator)
+      - subscribe to call_signals inserts for this chatRoom
   ----------------------------------------------------------- */
   useEffect(() => {
     let mounted = true;
@@ -255,12 +230,12 @@ const VideoCall: React.FC<VideoCallProps> = ({
       try {
         const local = await startLocalCamera();
 
-        // If caller, create peer immediately (initiator)
+        // caller should create peer right away (so they generate an offer)
         if (isCaller) {
           createPeer(true, local);
         }
 
-        // Subscribe only to INSERTs for this chatRoom
+        // subscribe to new rows in call_signals for this chat room
         const channel = supabase
           .channel(`webrtc-${chatRoomId}`)
           .on(
@@ -271,28 +246,28 @@ const VideoCall: React.FC<VideoCallProps> = ({
               table: "call_signals",
               filter: `chat_room_id=eq.${chatRoomId}`,
             },
-            (payload) => {
+            (payload: any) => {
               const row = payload.new;
               if (!row) return;
 
-              // ignore our own signals
+              // ignore our own inserted rows
               if (row.sender_id === currentUserId) return;
 
               const signal = extractSignalFromRow(row);
               if (!signal) {
-                console.warn("Received insert but couldn't extract signal", row);
+                console.warn("Incoming call_signals row had no usable signal:", row);
                 return;
               }
 
-              // apply all signals (offers / answers / candidates)
-              applySignal(signal, local);
+              // apply incoming signal
+              applySignal(signal);
             }
           )
           .subscribe();
 
         channelRef.current = channel;
       } catch (e) {
-        console.error("setup error", e);
+        console.error("setup error:", e);
       }
     };
 
@@ -306,13 +281,12 @@ const VideoCall: React.FC<VideoCallProps> = ({
       } catch (e) {
         // ignore
       }
-
       peerRef.current = null;
 
       try {
         if (channelRef.current) supabase.removeChannel(channelRef.current);
       } catch (e) {
-        console.warn("failed to remove channel", e);
+        console.warn("removeChannel failed", e);
       }
 
       if (localStream) localStream.getTracks().forEach((t) => t.stop());
@@ -342,6 +316,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
     } catch (e) {
       // ignore
     }
+    peerRef.current = null;
 
     if (localStream) localStream.getTracks().forEach((t) => t.stop());
     if (remoteStream) remoteStream.getTracks().forEach((t) => t.stop());
@@ -351,13 +326,15 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
     try {
       if (channelRef.current) supabase.removeChannel(channelRef.current);
-    } catch {}
+    } catch (e) {
+      // ignore
+    }
 
     onClose();
   };
 
   const reconnect = async () => {
-    // safer reconnect: destroy + re-init without full reload
+    // quick reconnect: destroy and reload component state
     try {
       peerRef.current?.destroy();
     } catch {}
@@ -366,16 +343,13 @@ const VideoCall: React.FC<VideoCallProps> = ({
     try {
       if (channelRef.current) supabase.removeChannel(channelRef.current);
     } catch {}
-    channelRef.current = null;
 
     if (localStream) localStream.getTracks().forEach((t) => t.stop());
     setLocalStream(null);
     setRemoteStream(null);
 
-    // re-setup
-    setTimeout(() => {
-      window.location.reload();
-    }, 200);
+    // simple reload to get clean state — you can implement finer-grained reconnection later
+    window.location.reload();
   };
 
   /* -----------------------------------------------------------
@@ -394,7 +368,11 @@ const VideoCall: React.FC<VideoCallProps> = ({
           />
         ) : (
           <div className="text-white/70 text-center p-4">
-            {status === "connecting" ? "Connecting…" : "Waiting for participant…"}
+            {status === "connecting"
+              ? "Connecting…"
+              : status === "starting"
+              ? "Starting camera…"
+              : "Waiting for participant…"}
           </div>
         )}
       </div>
@@ -439,7 +417,11 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
         {/* End Call */}
         <div className="mt-auto flex justify-center">
-          <Button onClick={endCall} variant="destructive" className="rounded-full px-4 py-2">
+          <Button
+            onClick={endCall}
+            variant="destructive"
+            className="rounded-full px-4 py-2 flex items-center gap-2"
+          >
             <PhoneOff />
             End Call
           </Button>
