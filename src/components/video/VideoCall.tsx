@@ -24,11 +24,7 @@ const ICE_SERVERS = [
 const log = (msg: string, ...rest: any[]) =>
   console.log("%c[VIDEO CALL] " + msg, "color:#60a5fa;font-weight:bold", ...rest);
 const err = (msg: string, ...rest: any[]) =>
-  console.error(
-    "%c[VIDEO CALL] " + msg,
-    "color:#f87171;font-weight:bold",
-    ...rest
-  );
+  console.error("%c[VIDEO CALL] " + msg, "color:#f87171;font-weight:bold", ...rest);
 
 interface Props {
   chatRoomId: string;
@@ -54,12 +50,14 @@ const VideoCall: React.FC<Props> = ({
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 
+  const pendingSignals = useRef<any[]>([]); // <— FIX: buffer signals
+
   const [connected, setConnected] = useState(false);
   const [cameraOn, setCameraOn] = useState(true);
   const [micOn, setMicOn] = useState(true);
 
   // ------------------------------------------------------
-  // INSERT SIGNAL TO SUPABASE
+  // INSERT SIGNAL INTO SUPABASE
   // ------------------------------------------------------
   const sendSignal = async (
     type: "call-offer" | "call-answer" | "webrtc-signal",
@@ -83,6 +81,8 @@ const VideoCall: React.FC<Props> = ({
   // CREATE PEER
   // ------------------------------------------------------
   const createPeer = (initiator: boolean) => {
+    if (peerRef.current) return peerRef.current;
+
     log("createPeer()", { initiator });
 
     const stream = localStreamRef.current!;
@@ -96,13 +96,9 @@ const VideoCall: React.FC<Props> = ({
     peer.on("signal", (data: any) => {
       log("peer emitted signal:", data);
 
-      if (data.type === "offer") {
-        sendSignal("call-offer", data);
-      } else if (data.type === "answer") {
-        sendSignal("call-answer", data);
-      } else {
-        sendSignal("webrtc-signal", data);
-      }
+      if (data.type === "offer") sendSignal("call-offer", data);
+      else if (data.type === "answer") sendSignal("call-answer", data);
+      else sendSignal("webrtc-signal", data);
     });
 
     peer.on("stream", (remoteStream) => {
@@ -123,6 +119,17 @@ const VideoCall: React.FC<Props> = ({
     peer.on("close", () => log("peer closed"));
 
     peerRef.current = peer;
+
+    // After creation → flush pending signals
+    setTimeout(() => {
+      if (pendingSignals.current.length > 0) {
+        log("Flushing pending signals", pendingSignals.current);
+        pendingSignals.current.forEach((s) => peer.signal(s));
+        pendingSignals.current = [];
+      }
+    }, 30);
+
+    return peer;
   };
 
   // ------------------------------------------------------
@@ -134,25 +141,37 @@ const VideoCall: React.FC<Props> = ({
     const { type, signal, sender_id } = row;
     if (sender_id === currentUserId) return; // ignore own signal
 
-    // receiver receives OFFER → create peer & answer
-    if (type === "call-offer" && !peerRef.current) {
-      log("Received OFFER → creating peer (non-initiator)");
-      createPeer(false);
-      peerRef.current!.signal(signal);
+    const peer = peerRef.current;
+
+    // Receiver first receives OFFER → create peer
+    if (type === "call-offer") {
+      log("Received OFFER → ensure peer and apply offer");
+
+      if (!peer) {
+        createPeer(false);
+        pendingSignals.current.push(signal); // store until peer ready
+      } else {
+        peer.signal(signal);
+      }
       return;
     }
 
-    // caller receives ANSWER
+    // Caller receives ANSWER
     if (type === "call-answer") {
       log("Received ANSWER → applying");
-      peerRef.current?.signal(signal);
+      peer?.signal(signal);
       return;
     }
 
-    // both sides exchange ICE candidates
+    // ICE Candidates
     if (type === "webrtc-signal") {
-      log("Received ICE candidate → applying");
-      peerRef.current?.signal(signal);
+      if (!peer) {
+        log("No peer yet — ICE stored");
+        pendingSignals.current.push(signal);
+        return;
+      }
+      log("Applying ICE candidate");
+      peer.signal(signal);
       return;
     }
   };
@@ -164,7 +183,6 @@ const VideoCall: React.FC<Props> = ({
     log("mount", { chatRoomId, callerId, receiverId, currentUserId });
 
     (async () => {
-      // get user media
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
@@ -177,7 +195,7 @@ const VideoCall: React.FC<Props> = ({
         localVideoRef.current.play().catch(() => {});
       }
 
-      // caller creates peer immediately
+      // Caller immediately creates peer
       if (isCaller) {
         createPeer(true);
       }
@@ -212,7 +230,7 @@ const VideoCall: React.FC<Props> = ({
   }, []);
 
   // ------------------------------------------------------
-  // UI BUTTON HANDLERS
+  // UI HANDLERS
   // ------------------------------------------------------
   const toggleMic = () => {
     const stream = localStreamRef.current;
@@ -246,7 +264,9 @@ const VideoCall: React.FC<Props> = ({
           <div className="w-full h-48 bg-black rounded mb-2 overflow-hidden">
             <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
           </div>
-          <div className="text-white text-sm">{connected ? "Connected" : "Connecting…"}</div>
+          <div className="text-white text-sm">
+            {connected ? "Connected" : "Connecting…"}
+          </div>
         </div>
 
         <div className="bg-white/5 rounded p-4 flex justify-center gap-4">
@@ -264,7 +284,11 @@ const VideoCall: React.FC<Props> = ({
         </div>
 
         <div className="flex justify-center mt-auto">
-          <Button onClick={endCall} variant="destructive" className="rounded-full flex items-center gap-2 px-6 py-2">
+          <Button
+            onClick={endCall}
+            variant="destructive"
+            className="rounded-full flex items-center gap-2 px-6 py-2"
+          >
             <PhoneOff /> End Call
           </Button>
         </div>
