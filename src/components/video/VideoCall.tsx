@@ -14,12 +14,14 @@ import {
 
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
+
   {
-    urls: "turn:global.relay.metered.ca:80",
-    username: "openrelayproject",
-    credential: "openrelayproject",
-  },
+    urls: "turn:relay1.expressturn.com:3478",
+    username: "efgI9RB9qMUSBwDsyX",
+    credential: "oxTq3CgTpbxsyVB2",
+  }
 ];
+
 
 const log = (msg: string, ...rest: any[]) =>
   console.log("%c[VIDEO CALL] " + msg, "color:#60a5fa;font-weight:bold", ...rest);
