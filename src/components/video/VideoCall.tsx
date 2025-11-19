@@ -183,7 +183,11 @@ const VideoCall: React.FC<VideoCallProps> = ({
 
     peer.on("signal", async (s: any) => {
       SIGNAL_LOG("Generated SIGNAL (offer/answer/candidate):", s);
-      await insertSignalRow(chatRoomId, callerId, receiverId, currentUserId, s);
+      try {
+        await insertSignalRow(chatRoomId, callerId, receiverId, currentUserId, s);
+      } catch (err) {
+        ERROR_LOG("Failed to insert signal row:", err);
+      }
     });
 
     peer.on("stream", (stream: MediaStream) => {
@@ -238,6 +242,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
         return;
       }
 
+      // For receiver: create non-initiator peer lazily when first signal arrives
       createPeer(isCaller, localStream);
     }
 
@@ -261,42 +266,55 @@ const VideoCall: React.FC<VideoCallProps> = ({
       try {
         const stream = await startLocalCamera();
 
+        // Caller creates initiator peer immediately
         if (isCaller) {
           LOG("User is CALLER → creating peer as initiator");
           createPeer(true, stream);
         }
 
-        LOG("Subscribing to Supabase Realtime...");
+        LOG("Subscribing to Supabase Realtime (webrtc-signal rows for this chat_room_id)...");
 
-     const channel = supabase
-  .channel(`webrtc-${chatRoomId}`)
-  .on(
-    "postgres_changes",
-    {
-      event: "INSERT",
-      schema: "public",
-      table: "call_signals",
-    },
-    (payload: any) => {
-      DB_LOG("Realtime CALLBACK triggered:", payload);
+        // Only subscribe to rows for this chat_room_id AND type=webrtc-signal
+        // (avoids reacting to call-accepted / call-offered rows that have no 'signal' payload)
+        const channel = supabase
+          .channel(`webrtc-${chatRoomId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "INSERT",
+              schema: "public",
+              table: "call_signals",
+              // filter only rows for this chat_room_id AND webrtc-signal type
+              filter: `chat_room_id=eq.${chatRoomId},type=eq.webrtc-signal`,
+            },
+            (payload: any) => {
+              DB_LOG("Realtime CALLBACK triggered:", payload);
 
-      if (payload.new.chat_room_id !== chatRoomId) {
-        DB_LOG("Ignoring signal from other room");
-        return;
-      }
+              // payload.new should be a webrtc-signal row with .signal set
+              // Defensive checks:
+              if (!payload?.new) {
+                DB_LOG("Payload missing .new — ignoring");
+                return;
+              }
 
-      if (payload.new.sender_id === currentUserId) {
-        DB_LOG("Ignoring own signal");
-        return;
-      }
+              // Ignore signals we created ourselves
+              if (payload.new.sender_id === currentUserId) {
+                DB_LOG("Ignoring own signal");
+                return;
+              }
 
-      const signal = extractSignalFromRow(payload.new);
-      applySignal(signal);
-    }
-  )
-  .subscribe();
+              // Make sure there is a signal object
+              if (!payload.new.signal) {
+                DB_LOG("Incoming row has no signal → ignoring");
+                return;
+              }
 
-
+              // Extract and apply
+              const signal = extractSignalFromRow(payload.new);
+              if (signal) applySignal(signal);
+            }
+          )
+          .subscribe((status) => LOG("Supabase subscription status:", status));
 
         channelRef.current = channel;
       } catch (e) {
@@ -327,6 +345,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
         ERROR_LOG("removeChannel failed:", e);
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* -----------------------------------------------------------
