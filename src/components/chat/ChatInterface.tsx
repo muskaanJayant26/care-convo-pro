@@ -38,93 +38,168 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
 
   // call states
-  const [incomingCall, setIncomingCall] = useState<any>(null);
-  const [activeCall, setActiveCall] = useState<null | { caller_id: string; receiver_id: string; chat_room_id: string }>(null);
+  const [incomingCall, setIncomingCall] = useState<any | null>(null);
+  const [activeCall, setActiveCall] = useState< null | { caller_id: string; receiver_id: string; chat_room_id: string } >(null);
   const [isOutgoingCalling, setIsOutgoingCalling] = useState(false);
 
+  // channels refs so we can cleanup
+  const messagesChannelRef = useRef<any>(null);
+  const callsChannelRef = useRef<any>(null);
+
+  // simple ringtone
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
   function tryPlayRingtone() {
     if (!ringtoneRef.current) {
+      // tiny beep as data URI — replace with your mp3 if needed
       ringtoneRef.current = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA=');
       ringtoneRef.current.loop = true;
     }
-    ringtoneRef.current.play().catch(() => {});
+    ringtoneRef.current.play().catch(() => {
+      /* autoplay blocked - ignore */
+    });
   }
   function stopRingtone() {
-    ringtoneRef.current?.pause();
-    ringtoneRef.current = null;
+    if (ringtoneRef.current) {
+      try {
+        ringtoneRef.current.pause();
+      } catch {}
+      ringtoneRef.current = null;
+    }
   }
 
-  // fetch messages & subscribe
+  // fetch messages
+  const fetchMessages = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('chat_room_id', chatRoomId)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.error('fetchMessages error', error);
+      return;
+    }
+    setMessages((data as Message[]) || []);
+  }, [chatRoomId]);
+
+  // On mount -> fetch messages + subscribe to new messages
   useEffect(() => {
-    const fetchMessages = async () => {
-      const { data, error } = await supabase.from('messages').select('*').eq('chat_room_id', chatRoomId).order('created_at', { ascending: true });
-      if (!error) setMessages(data || []);
-    };
     fetchMessages();
 
     const msgChannel = supabase
       .channel(`chat-${chatRoomId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_room_id=eq.${chatRoomId}` }, (payload) => {
-        setMessages((cur) => [...cur, payload.new as Message]);
-      })
-      .subscribe();
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_room_id=eq.${chatRoomId}` },
+        (payload: any) => {
+          setMessages((cur) => [...cur, payload.new as Message]);
+        }
+      )
+      .subscribe((status) => {
+        // Optionally log status
+      });
 
-    return () => supabase.removeChannel(msgChannel);
-  }, [chatRoomId]);
+    messagesChannelRef.current = msgChannel;
 
-  // subscribe to call_signals for the chat room to detect incoming offers/accepted/rejected
+    return () => {
+      try {
+        if (messagesChannelRef.current) supabase.removeChannel(messagesChannelRef.current);
+      } catch (e) {
+        console.error('remove messages channel failed', e);
+      }
+    };
+  }, [chatRoomId, fetchMessages]);
+
+  // subscribe to call_signals for offers/accepted/rejected (UI-level events)
   useEffect(() => {
     const channel = supabase
-      .channel(`call-${chatRoomId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_signals', filter: `chat_room_id=eq.${chatRoomId}` }, (payload) => {
-        const row = payload.new as any;
+      .channel(`calls-${chatRoomId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'call_signals', filter: `chat_room_id=eq.${chatRoomId}` },
+        (payload: any) => {
+          const row = payload.new as any;
 
-        // incoming call for receiver
-        if (row.type === 'call-offer' && row.receiver_id === currentUserId) {
-          setIncomingCall(row);
-          tryPlayRingtone();
-        }
+          if (!row) return;
 
-        // accepted by receiver -> both sides should open VideoCall UI
-        if (row.type === 'call-accepted') {
-          if (row.caller_id === currentUserId || row.receiver_id === currentUserId) {
-            setActiveCall({ caller_id: row.caller_id, receiver_id: row.receiver_id, chat_room_id: row.chat_room_id });
-            setIncomingCall(null);
+          // If it's an offer and the current user is the receiver -> show incoming popup
+          if (row.type === 'call-offer' && row.receiver_id === currentUserId) {
+            setIncomingCall(row);
+            tryPlayRingtone();
+            return;
+          }
+
+          // If someone accepted the call -> both sides should open VideoCall UI
+          if (row.type === 'call-accepted') {
+            // if this user is either caller or receiver for this row, set active call
+            if (row.caller_id === currentUserId || row.receiver_id === currentUserId) {
+              setActiveCall({ caller_id: row.caller_id, receiver_id: row.receiver_id, chat_room_id: row.chat_room_id });
+              setIncomingCall(null);
+              setIsOutgoingCalling(false);
+              stopRingtone();
+            }
+            return;
+          }
+
+          // If rejected and current user is caller -> show rejection toast
+          if (row.type === 'call-rejected' && row.caller_id === currentUserId) {
+            toast({ title: 'Call Rejected', description: `${otherUserName} rejected your call.` });
             setIsOutgoingCalling(false);
             stopRingtone();
+            return;
           }
-        }
 
-        // rejected
-        if (row.type === 'call-rejected' && row.caller_id === currentUserId) {
-          toast({ title: 'Call Rejected', description: `${otherUserName} rejected the call.` });
-          setIsOutgoingCalling(false);
-          stopRingtone();
+          // Note: VideoCall component listens to 'webrtc-signal' rows itself; we don't need to forward them here.
         }
-      })
-      .subscribe();
+      )
+      .subscribe((status) => {
+        // optional logging
+      });
 
-    return () => supabase.removeChannel(channel);
+    callsChannelRef.current = channel;
+
+    return () => {
+      try {
+        if (callsChannelRef.current) supabase.removeChannel(callsChannelRef.current);
+      } catch (e) {
+        console.error('remove calls channel failed', e);
+      }
+    };
   }, [chatRoomId, currentUserId, otherUserName, toast]);
+
+  // scroll to bottom when messages change
+  useEffect(() => {
+    if (scrollAreaRef.current) {
+      try {
+        scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+      } catch {}
+    }
+  }, [messages]);
 
   const sendMessage = async () => {
     if (!newMessage.trim()) return;
     setLoading(true);
-    const { error } = await supabase.from('messages').insert({ chat_room_id: chatRoomId, sender_id: currentUserId, message: newMessage.trim() });
-    if (error) toast({ title: 'Error', description: 'Failed to send message', variant: 'destructive' });
-    else setNewMessage('');
+    const { error } = await supabase.from('messages').insert({
+      chat_room_id: chatRoomId,
+      sender_id: currentUserId,
+      message: newMessage.trim(),
+    });
+    if (error) {
+      console.error('sendMessage error', error);
+      toast({ title: 'Error', description: 'Failed to send message', variant: 'destructive' });
+    } else {
+      setNewMessage('');
+    }
     setLoading(false);
   };
 
-  // start call (caller)
+  // start call (caller) -> insert call-offer
   const startCall = async () => {
     try {
       setIsOutgoingCalling(true);
       setActiveCall({ caller_id: currentUserId, receiver_id: otherUserId, chat_room_id: chatRoomId });
 
-      // insert call-offer
-      await supabase.from('call_signals').insert({
+      const { error } = await supabase.from('call_signals').insert({
         chat_room_id: chatRoomId,
         caller_id: currentUserId,
         receiver_id: otherUserId,
@@ -132,21 +207,25 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         type: 'call-offer',
       });
 
+      if (error) {
+        throw error;
+      }
+
       toast({ title: 'Calling', description: `Ringing ${otherUserName}...` });
-    } catch (err) {
-      console.error(err);
-      toast({ title: 'Error', description: 'Failed to start call' });
+    } catch (e) {
+      console.error('startCall error', e);
+      toast({ title: 'Error', description: 'Failed to start call', variant: 'destructive' });
       setIsOutgoingCalling(false);
       setActiveCall(null);
     }
   };
 
-  // accept call (receiver)
+  // accept call (receiver) -> insert call-accepted
   const acceptCall = async () => {
     if (!incomingCall) return;
     try {
       stopRingtone();
-      await supabase.from('call_signals').insert({
+      const { error } = await supabase.from('call_signals').insert({
         chat_room_id: chatRoomId,
         caller_id: incomingCall.caller_id,
         receiver_id: incomingCall.receiver_id,
@@ -154,33 +233,43 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         type: 'call-accepted',
       });
 
+      if (error) {
+        throw error;
+      }
+
       setActiveCall({ caller_id: incomingCall.caller_id, receiver_id: incomingCall.receiver_id, chat_room_id: chatRoomId });
       setIncomingCall(null);
-    } catch (err) {
-      console.error('acceptCall error', err);
-      toast({ title: 'Error', description: 'Failed to accept call' });
+    } catch (e) {
+      console.error('acceptCall error', e);
+      toast({ title: 'Error', description: 'Failed to accept call', variant: 'destructive' });
     }
   };
 
-  // reject call (receiver)
+  // reject call (receiver) -> insert call-rejected
   const rejectCall = async () => {
     if (!incomingCall) return;
     try {
       stopRingtone();
-      await supabase.from('call_signals').insert({
+      const { error } = await supabase.from('call_signals').insert({
         chat_room_id: chatRoomId,
         caller_id: incomingCall.caller_id,
         receiver_id: incomingCall.receiver_id,
         sender_id: currentUserId,
         type: 'call-rejected',
       });
+
+      if (error) {
+        throw error;
+      }
+
       setIncomingCall(null);
-    } catch (err) {
-      console.error('rejectCall error', err);
-      toast({ title: 'Error', description: 'Failed to reject call' });
+    } catch (e) {
+      console.error('rejectCall error', e);
+      toast({ title: 'Error', description: 'Failed to reject call', variant: 'destructive' });
     }
   };
 
+  // when VideoCall triggers close -> clear call UI
   const handleVideoCallClose = () => {
     setActiveCall(null);
     setIsOutgoingCalling(false);
@@ -188,15 +277,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   return (
     <div className="flex flex-col h-[500px] relative">
-      {/* Incoming call modal */}
+      {/* incoming call modal */}
       {incomingCall && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white p-6 rounded shadow w-[320px] text-center">
-            <h3 className="font-bold">Incoming call</h3>
-            <p className="text-sm">{otherUserName} is calling you</p>
+            <h3 className="font-bold text-lg">Incoming call</h3>
+            <p className="text-sm mt-2">{otherUserName} is calling you</p>
             <div className="flex gap-3 mt-4">
-              <Button onClick={acceptCall} className="flex-1">Accept</Button>
-              <Button onClick={rejectCall} variant="destructive" className="flex-1">Reject</Button>
+              <Button className="flex-1" onClick={acceptCall}>Accept</Button>
+              <Button className="flex-1" variant="destructive" onClick={rejectCall}>Reject</Button>
             </div>
           </div>
         </div>
@@ -246,7 +335,19 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         )}
 
         <div className="flex gap-2">
-          <Input value={newMessage} onChange={(e) => setNewMessage(e.target.value)} placeholder="Type a message..." disabled={loading} className="flex-1" />
+          <Input
+            value={newMessage}
+            onChange={(e) => setNewMessage(e.target.value)}
+            placeholder="Type a message..."
+            disabled={loading}
+            className="flex-1"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
+          />
           <Button onClick={sendMessage} disabled={loading || !newMessage.trim()} size="icon">
             <Send className="w-4 h-4" />
           </Button>
