@@ -50,11 +50,33 @@ const VideoCall: React.FC<Props> = ({
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  const pendingSignals = useRef<any[]>([]); // <— FIX: buffer signals
+  const pendingSignals = useRef<any[]>([]); // <— buffer signals until peer+stream ready
 
   const [connected, setConnected] = useState(false);
   const [cameraOn, setCameraOn] = useState(true);
   const [micOn, setMicOn] = useState(true);
+
+  // ------------------------------------------------------
+  // Helper: flush pending signals only when peer + local stream ready
+  // ------------------------------------------------------
+  const tryFlushSignals = () => {
+    if (!peerRef.current) return;
+    if (!localStreamRef.current) return;
+    if (pendingSignals.current.length === 0) return;
+
+    log("Flushing pending signals", pendingSignals.current);
+
+    // apply each buffered signal
+    pendingSignals.current.forEach((s) => {
+      try {
+        peerRef.current!.signal(s);
+      } catch (e) {
+        err("Error applying buffered signal", e);
+      }
+    });
+
+    pendingSignals.current = [];
+  };
 
   // ------------------------------------------------------
   // INSERT SIGNAL INTO SUPABASE
@@ -85,7 +107,12 @@ const VideoCall: React.FC<Props> = ({
 
     log("createPeer()", { initiator });
 
-    const stream = localStreamRef.current!;
+    const stream = localStreamRef.current;
+    if (!stream) {
+      err("createPeer called but local stream not ready");
+      return null;
+    }
+
     const peer = new SimplePeer({
       initiator,
       trickle: true,
@@ -96,12 +123,12 @@ const VideoCall: React.FC<Props> = ({
     peer.on("signal", (data: any) => {
       log("peer emitted signal:", data);
 
-      if (data.type === "offer") sendSignal("call-offer", data);
-      else if (data.type === "answer") sendSignal("call-answer", data);
+      if (data && (data as any).type === "offer") sendSignal("call-offer", data);
+      else if (data && (data as any).type === "answer") sendSignal("call-answer", data);
       else sendSignal("webrtc-signal", data);
     });
 
-    peer.on("stream", (remoteStream) => {
+    peer.on("stream", (remoteStream: MediaStream) => {
       log("remote stream received");
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = remoteStream;
@@ -114,29 +141,20 @@ const VideoCall: React.FC<Props> = ({
       setConnected(true);
     });
 
-    peer.on("error", (e) => err("peer error", e));
+    peer.on("error", (e: any) => err("peer error", e));
 
     peer.on("close", () => log("peer closed"));
 
     peerRef.current = peer;
 
-    // After creation → flush pending signals
-  const tryFlushSignals = () => {
-  if (!peerRef.current) return;
-  if (!localStreamRef.current) return;
-  if (pendingSignals.current.length === 0) return;
+    // Give the peer a small moment to initialize, then try flushing any buffered signals.
+    setTimeout(() => {
+      tryFlushSignals();
+    }, 100);
 
-  log("Flushing pending signals", pendingSignals.current);
-
-  pendingSignals.current.forEach((s) => peerRef.current!.signal(s));
-  pendingSignals.current = [];
-};
     return peer;
   };
 
-  setTimeout(() => {
-  tryFlushSignals();
-}, 100);
   // ------------------------------------------------------
   // APPLY INCOMING SIGNAL
   // ------------------------------------------------------
@@ -148,36 +166,49 @@ const VideoCall: React.FC<Props> = ({
 
     const peer = peerRef.current;
 
-    // Receiver first receives OFFER → create peer
-  if (type === "call-offer") {
-  if (!localStreamRef.current) {
-    log("Stream not ready — delaying offer");
-    pendingSignals.current.push(signal);
-    return;
-  }
+    // Receiver first receives OFFER → ensure local stream + peer, then apply
+    if (type === "call-offer") {
+      log("Received OFFER → ensure peer and apply offer");
 
-  if (!peer) createPeer(false);
+      // If local stream isn't ready yet, buffer the offer until it is.
+      if (!localStreamRef.current) {
+        log("Local stream not ready — buffering offer");
+        pendingSignals.current.push(signal);
+        return;
+      }
 
-  peer.signal(signal);
-  return;
-}
+      // Create peer (receiver side: initiator=false) if not exists
+      if (!peerRef.current) {
+        createPeer(false);
+      }
+
+      // Buffer the offer and attempt flush (flush will run only when both peer+stream ready)
+      pendingSignals.current.push(signal);
+      tryFlushSignals();
+      return;
+    }
 
     // Caller receives ANSWER
     if (type === "call-answer") {
       log("Received ANSWER → applying");
-      peer?.signal(signal);
+      if (!peerRef.current) {
+        log("No peer yet — buffering answer");
+        pendingSignals.current.push(signal);
+        return;
+      }
+      peerRef.current.signal(signal);
       return;
     }
 
-    // ICE Candidates
+    // ICE Candidates (webrtc-signal)
     if (type === "webrtc-signal") {
-      if (!peer) {
-        log("No peer yet — ICE stored");
+      if (!peerRef.current || !localStreamRef.current) {
+        log("No peer or local stream yet — buffering ICE candidate");
         pendingSignals.current.push(signal);
         return;
       }
       log("Applying ICE candidate");
-      peer.signal(signal);
+      peerRef.current.signal(signal);
       return;
     }
   };
@@ -188,57 +219,78 @@ const VideoCall: React.FC<Props> = ({
   useEffect(() => {
     log("mount", { chatRoomId, callerId, receiverId, currentUserId });
 
+    let mounted = true;
+
     (async () => {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
+      try {
+        // get local media once
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
 
-      localStreamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.muted = true;
-        localVideoRef.current.play().catch(() => {});
+        if (!mounted) {
+          // component unmounted while getting media
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        localStreamRef.current = stream;
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+          localVideoRef.current.muted = true;
+          localVideoRef.current.play().catch(() => {});
+        }
+
+        // Now that local stream is ready, create caller peer if this user is the caller.
+        if (isCaller) {
+          log("Caller creating peer AFTER media stream ready");
+          createPeer(true);
+          // tryFlushSignals will be attempted inside createPeer's timeout as well
+        } else {
+          log("Receiver ready — waiting for offer");
+          // If receiver already has buffered signals (unlikely), attempt flush (no-op if no peer).
+          tryFlushSignals();
+        }
+
+        // Realtime subscription to call_signals for this chat room
+        const channel = supabase
+          .channel("webrtc-" + chatRoomId)
+          .on(
+            "postgres_changes",
+            {
+              event: "INSERT",
+              schema: "public",
+              table: "call_signals",
+              filter: `chat_room_id=eq.${chatRoomId}`,
+            },
+            (payload) => {
+              log("🔥 realtime payload", payload.new);
+              applyIncomingSignal(payload.new);
+            }
+          )
+          .subscribe((status) => log("subscribe status:", status));
+
+        channelRef.current = channel;
+      } catch (e) {
+        err("getUserMedia or setup failed", e);
       }
-
-      // Caller immediately creates peer
-   // Wait until stream is ready before creating peer
-await navigator.mediaDevices.getUserMedia({...});
-localStreamRef.current = stream;
-
-// NOW allow creating caller peer
-if (isCaller) {
-  log("Caller creating peer AFTER media stream ready");
-  createPeer(true);
-}
-
-      // Realtime subscription
-      const channel = supabase
-        .channel("webrtc-" + chatRoomId)
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "call_signals",
-            filter: `chat_room_id=eq.${chatRoomId}`,
-          },
-          (payload) => {
-            log("🔥 realtime payload", payload.new);
-            applyIncomingSignal(payload.new);
-          }
-        )
-        .subscribe((status) => log("subscribe status:", status));
-
-      channelRef.current = channel;
     })();
 
     return () => {
+      mounted = false;
       log("cleanup");
-      peerRef.current?.destroy();
-      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      try {
+        peerRef.current?.destroy();
+      } catch (e) {
+        // swallow
+      }
+      try {
+        localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      } catch (e) {}
       if (channelRef.current) supabase.removeChannel(channelRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ------------------------------------------------------
@@ -259,7 +311,9 @@ if (isCaller) {
   };
 
   const endCall = () => {
-    peerRef.current?.destroy();
+    try {
+      peerRef.current?.destroy();
+    } catch (e) {}
     onClose();
   };
 
@@ -267,14 +321,25 @@ if (isCaller) {
     <div className="grid grid-cols-12 gap-4 w-full h-full bg-black p-4 rounded">
       {/* Remote Video */}
       <div className="col-span-8 bg-black flex items-center justify-center rounded relative">
-        <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          className="w-full h-full object-cover"
+        />
       </div>
 
       {/* Controls + Local Video */}
       <div className="col-span-4 flex flex-col gap-4">
         <div className="bg-white/5 rounded p-3 flex flex-col items-center">
           <div className="w-full h-48 bg-black rounded mb-2 overflow-hidden">
-            <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+            <video
+              ref={localVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
           </div>
           <div className="text-white text-sm">
             {connected ? "Connected" : "Connecting…"}
