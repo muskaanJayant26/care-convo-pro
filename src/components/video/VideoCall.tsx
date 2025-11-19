@@ -13,6 +13,21 @@ import {
 } from "lucide-react";
 
 /* -----------------------------------------------------------
+  Helper Loggers
+----------------------------------------------------------- */
+const LOG = (msg: string, ...rest: any[]) =>
+  console.log(`%c[VIDEO CALL] ${msg}`, "color:#4ade80;font-weight:bold", ...rest);
+
+const SIGNAL_LOG = (msg: string, ...rest: any[]) =>
+  console.log(`%c[SIGNAL] ${msg}`, "color:#60a5fa;font-weight:bold", ...rest);
+
+const ERROR_LOG = (msg: string, ...rest: any[]) =>
+  console.error(`%c[ERROR] ${msg}`, "color:#f87171;font-weight:bold", ...rest);
+
+const DB_LOG = (msg: string, ...rest: any[]) =>
+  console.log(`%c[DB] ${msg}`, "color:#facc15;font-weight:bold", ...rest);
+
+/* -----------------------------------------------------------
   Props
 ----------------------------------------------------------- */
 interface VideoCallProps {
@@ -24,7 +39,7 @@ interface VideoCallProps {
 }
 
 /* -----------------------------------------------------------
-  ICE SERVERS (keep/extend these as needed)
+  ICE SERVERS
 ----------------------------------------------------------- */
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -36,7 +51,7 @@ const ICE_SERVERS = [
 ];
 
 /* -----------------------------------------------------------
-  Insert a signal row into call_signals (uses `signal` JSONB)
+ Insert Signal Row
 ----------------------------------------------------------- */
 const insertSignalRow = async (
   chatRoomId: string,
@@ -45,6 +60,8 @@ const insertSignalRow = async (
   senderId: string,
   signal: any
 ) => {
+  DB_LOG("Inserting signal row:", { chatRoomId, senderId, signal });
+
   try {
     const { data, error } = await supabase
       .from("call_signals")
@@ -59,29 +76,31 @@ const insertSignalRow = async (
         },
       ])
       .select();
+
     if (error) {
-      console.error("insertSignalRow error:", error);
+      ERROR_LOG("insertSignalRow ERROR:", error);
       return null;
     }
+
+    DB_LOG("insertSignalRow SUCCESS:", data?.[0]);
     return data?.[0] ?? null;
   } catch (e) {
-    console.error("insertSignalRow exception:", e);
+    ERROR_LOG("insertSignalRow exception:", e);
     return null;
   }
 };
 
 /* -----------------------------------------------------------
-  Simple extractor (here we trust `signal` column exists)
-  Add extra parsing if your app stores other shapes later.
+ Extract Signal Utility
 ----------------------------------------------------------- */
 const extractSignalFromRow = (row: any) => {
+  DB_LOG("Extracting signal from row:", row);
   if (!row) return null;
-  if (row.signal) return row.signal;
-  return null;
+  return row.signal ?? null;
 };
 
 /* -----------------------------------------------------------
-  Component
+ Component
 ----------------------------------------------------------- */
 const VideoCall: React.FC<VideoCallProps> = ({
   chatRoomId,
@@ -90,6 +109,8 @@ const VideoCall: React.FC<VideoCallProps> = ({
   currentUserId,
   onClose,
 }) => {
+  LOG("Component mounted", { chatRoomId, callerId, receiverId, currentUserId });
+
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerRef = useRef<SimplePeer.Instance | null>(null);
@@ -104,60 +125,71 @@ const VideoCall: React.FC<VideoCallProps> = ({
   >("idle");
 
   const isCaller = currentUserId === callerId;
+  LOG("User role:", { isCaller });
 
   /* -----------------------------------------------------------
-    Start local camera & mic
+    Start Local Camera
   ----------------------------------------------------------- */
   const startLocalCamera = async () => {
+    LOG("Requesting local camera + mic...");
+    setStatus("starting");
+
     try {
-      setStatus("starting");
-      const s = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
-      setLocalStream(s);
-      // attach to local video element
+
+      LOG("Local media acquired:", stream);
+
+      setLocalStream(stream);
+
       if (localVideoRef.current) {
-        localVideoRef.current.srcObject = s;
+        localVideoRef.current.srcObject = stream;
         localVideoRef.current.muted = true;
         localVideoRef.current.playsInline = true;
         localVideoRef.current.play().catch(() => {});
       }
-      return s;
+
+      return stream;
     } catch (e) {
-      console.error("getUserMedia failed", e);
+      ERROR_LOG("getUserMedia FAILED:", e);
       setStatus("error");
       throw e;
     }
   };
 
   /* -----------------------------------------------------------
-    Create SimplePeer instance
+    Create Peer
   ----------------------------------------------------------- */
   const createPeer = (initiator: boolean, local: MediaStream) => {
-    if (peerRef.current) return peerRef.current;
+    LOG("Creating peer:", { initiator, local });
+
+    if (peerRef.current) {
+      LOG("Peer already exists → using existing peer");
+      return peerRef.current;
+    }
 
     setStatus("connecting");
 
-    const p = new SimplePeer({
+    const peer = new SimplePeer({
       initiator,
       trickle: true,
       stream: local,
       config: { iceServers: ICE_SERVERS },
     });
 
-    p.on("signal", async (s: any) => {
-      // store raw offer/answer/candidate into DB
-      try {
-        await insertSignalRow(chatRoomId, callerId, receiverId, currentUserId, s);
-      } catch (err) {
-        console.error("failed to insert signal", err);
-      }
+    LOG("Peer instance created:", peer);
+
+    peer.on("signal", async (s: any) => {
+      SIGNAL_LOG("Generated SIGNAL (offer/answer/candidate):", s);
+      await insertSignalRow(chatRoomId, callerId, receiverId, currentUserId, s);
     });
 
-    p.on("stream", (stream: MediaStream) => {
+    peer.on("stream", (stream: MediaStream) => {
+      LOG("Received REMOTE STREAM");
       setRemoteStream(stream);
-      // attach to remote element safely
+
       setTimeout(() => {
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = stream;
@@ -167,75 +199,75 @@ const VideoCall: React.FC<VideoCallProps> = ({
       }, 50);
     });
 
-    p.on("connect", () => {
-      console.log("Peer connected");
+    peer.on("connect", () => {
+      LOG("PEER CONNECTED (WebRTC established)");
       setStatus("connected");
     });
 
-    p.on("close", () => {
-      console.log("Peer closed");
+    peer.on("close", () => {
+      LOG("Peer closed");
       setStatus("idle");
-      // trigger parent close so UI removes VideoCall overlay
       onClose();
     });
 
-    p.on("error", (err: any) => {
-      console.error("Peer error:", err);
+    peer.on("error", (err: any) => {
+      ERROR_LOG("Peer ERROR:", err);
       setStatus("error");
     });
 
-    peerRef.current = p;
-    return p;
+    peerRef.current = peer;
+    return peer;
   };
 
   /* -----------------------------------------------------------
-    Apply incoming signal
+    Apply Incoming Signal
   ----------------------------------------------------------- */
   const applySignal = (signal: any) => {
-    if (!signal) return;
-    try {
-      if (!peerRef.current) {
-        // create peer using our role:
-        // caller should already have created peer when opening UI,
-        // but if not, create with `initiator = isCaller`
-        if (!localStream) {
-          console.warn("applySignal called before localStream ready — queued by subscription until local stream ready");
-          return;
-        }
-        createPeer(isCaller, localStream);
-      }
-      // small delay to avoid race with peer creation
-      setTimeout(() => {
-        try {
-          peerRef.current?.signal(signal);
-        } catch (e) {
-          console.error("Error applying signal to peer:", e);
-        }
-      }, 20);
-    } catch (e) {
-      console.error("applySignal error:", e);
+    SIGNAL_LOG("Applying incoming signal:", signal);
+
+    if (!signal) {
+      ERROR_LOG("applySignal called with empty signal");
+      return;
     }
+
+    if (!peerRef.current) {
+      LOG("Peer missing → re-creating peer before applying signal");
+
+      if (!localStream) {
+        ERROR_LOG("applySignal attempted before localStream ready");
+        return;
+      }
+
+      createPeer(isCaller, localStream);
+    }
+
+    setTimeout(() => {
+      try {
+        peerRef.current?.signal(signal);
+        SIGNAL_LOG("Signal applied successfully");
+      } catch (e) {
+        ERROR_LOG("Error applying signal to peer:", e);
+      }
+    }, 20);
   };
 
   /* -----------------------------------------------------------
-    Setup on mount:
-      - start local camera
-      - if caller: create peer immediately (initiator)
-      - subscribe to call_signals inserts for this chatRoom
+    Setup (onMount)
   ----------------------------------------------------------- */
   useEffect(() => {
-    let mounted = true;
+    LOG("Setting up component...");
 
-    const setup = async () => {
+    const init = async () => {
       try {
-        const local = await startLocalCamera();
+        const stream = await startLocalCamera();
 
-        // caller should create peer right away (so they generate an offer)
         if (isCaller) {
-          createPeer(true, local);
+          LOG("User is CALLER → creating peer as initiator");
+          createPeer(true, stream);
         }
 
-        // subscribe to new rows in call_signals for this chat room
+        LOG("Subscribing to Supabase Realtime...");
+
         const channel = supabase
           .channel(`webrtc-${chatRoomId}`)
           .on(
@@ -247,76 +279,75 @@ const VideoCall: React.FC<VideoCallProps> = ({
               filter: `chat_room_id=eq.${chatRoomId}`,
             },
             (payload: any) => {
-              const row = payload.new;
-              if (!row) return;
+              DB_LOG("Realtime CALLBACK triggered:", payload);
 
-              // ignore our own inserted rows
-              if (row.sender_id === currentUserId) return;
-
-              const signal = extractSignalFromRow(row);
-              if (!signal) {
-                console.warn("Incoming call_signals row had no usable signal:", row);
+              if (payload.new.sender_id === currentUserId) {
+                DB_LOG("Ignoring own signal");
                 return;
               }
 
-              // apply incoming signal
+              const signal = extractSignalFromRow(payload.new);
               applySignal(signal);
             }
           )
-          .subscribe();
+          .subscribe((status) => LOG("Supabase subscription status:", status));
 
         channelRef.current = channel;
       } catch (e) {
-        console.error("setup error:", e);
+        ERROR_LOG("init failed:", e);
       }
     };
 
-    setup();
+    init();
 
     return () => {
-      mounted = false;
+      LOG("Cleaning up component...");
 
       try {
         peerRef.current?.destroy();
       } catch (e) {
-        // ignore
-      }
-      peerRef.current = null;
-
-      try {
-        if (channelRef.current) supabase.removeChannel(channelRef.current);
-      } catch (e) {
-        console.warn("removeChannel failed", e);
+        ERROR_LOG("Error destroying peer:", e);
       }
 
       if (localStream) localStream.getTracks().forEach((t) => t.stop());
       if (remoteStream) remoteStream.getTracks().forEach((t) => t.stop());
+
+      try {
+        if (channelRef.current) {
+          LOG("Removing Supabase channel...");
+          supabase.removeChannel(channelRef.current);
+        }
+      } catch (e) {
+        ERROR_LOG("removeChannel failed:", e);
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatRoomId, callerId, receiverId, currentUserId]);
+  }, []);
 
   /* -----------------------------------------------------------
     Controls
   ----------------------------------------------------------- */
   const toggleMute = () => {
+    LOG("Toggling Mute… before:", muted);
     if (!localStream) return;
     localStream.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
-    setMuted((m) => !m);
+    setMuted((v) => !v);
   };
 
   const toggleCamera = () => {
+    LOG("Toggling Camera… before:", cameraOn);
     if (!localStream) return;
     localStream.getVideoTracks().forEach((t) => (t.enabled = !t.enabled));
-    setCameraOn((c) => !c);
+    setCameraOn((v) => !v);
   };
 
   const endCall = () => {
+    LOG("Ending call manually…");
+
     try {
       peerRef.current?.destroy();
     } catch (e) {
-      // ignore
+      ERROR_LOG("Error destroying peer:", e);
     }
-    peerRef.current = null;
 
     if (localStream) localStream.getTracks().forEach((t) => t.stop());
     if (remoteStream) remoteStream.getTracks().forEach((t) => t.stop());
@@ -325,30 +356,17 @@ const VideoCall: React.FC<VideoCallProps> = ({
     setRemoteStream(null);
 
     try {
-      if (channelRef.current) supabase.removeChannel(channelRef.current);
-    } catch (e) {
-      // ignore
-    }
+      if (channelRef.current) {
+        LOG("Removing channel on endCall()");
+        supabase.removeChannel(channelRef.current);
+      }
+    } catch (e) {}
 
     onClose();
   };
 
-  const reconnect = async () => {
-    // quick reconnect: destroy and reload component state
-    try {
-      peerRef.current?.destroy();
-    } catch {}
-    peerRef.current = null;
-
-    try {
-      if (channelRef.current) supabase.removeChannel(channelRef.current);
-    } catch {}
-
-    if (localStream) localStream.getTracks().forEach((t) => t.stop());
-    setLocalStream(null);
-    setRemoteStream(null);
-
-    // simple reload to get clean state — you can implement finer-grained reconnection later
+  const reconnect = () => {
+    LOG("FORCE RECONNECT triggered");
     window.location.reload();
   };
 
@@ -360,70 +378,38 @@ const VideoCall: React.FC<VideoCallProps> = ({
       {/* Remote Video */}
       <div className="col-span-8 bg-black rounded overflow-hidden relative flex items-center justify-center">
         {remoteStream ? (
-          <video
-            ref={remoteVideoRef}
-            autoPlay
-            playsInline
-            className="w-full h-full object-cover"
-          />
+          <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
         ) : (
-          <div className="text-white/70 text-center p-4">
-            {status === "connecting"
-              ? "Connecting…"
-              : status === "starting"
-              ? "Starting camera…"
-              : "Waiting for participant…"}
-          </div>
+          <div className="text-white/70">{status === "connecting" ? "Connecting…" : "Waiting…"}</div>
         )}
       </div>
 
       {/* Sidebar */}
       <div className="col-span-4 p-4 flex flex-col gap-4">
-        {/* Local Video */}
         <div className="bg-white/5 rounded p-3 flex-1 flex flex-col items-center">
           <div className="w-full h-48 bg-black rounded overflow-hidden">
-            <video
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className="w-full h-full object-cover"
-            />
+            <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
           </div>
-          <div className="text-white mt-2 text-sm">You</div>
+          <div className="text-white mt-2 text-sm">You ({status})</div>
         </div>
 
-        {/* Status + Controls */}
         <div className="bg-white/5 rounded p-3">
-          <div className="flex justify-between text-white mb-3">
-            <div>Status</div>
-            <div>{status}</div>
-          </div>
-
-          <div className="flex justify-center gap-3">
+          <div className="flex justify-center gap-4">
             <Button onClick={toggleMute} className="w-10 h-10 rounded-full">
               {muted ? <MicOff /> : <Mic />}
             </Button>
-
             <Button onClick={toggleCamera} className="w-10 h-10 rounded-full">
               {cameraOn ? <VideoIcon /> : <VideoOff />}
             </Button>
-
             <Button onClick={reconnect} className="w-10 h-10 rounded-full">
               <RefreshCw />
             </Button>
           </div>
         </div>
 
-        {/* End Call */}
         <div className="mt-auto flex justify-center">
-          <Button
-            onClick={endCall}
-            variant="destructive"
-            className="rounded-full px-4 py-2 flex items-center gap-2"
-          >
-            <PhoneOff />
-            End Call
+          <Button onClick={endCall} variant="destructive" className="rounded-full flex items-center gap-2 px-4 py-2">
+            <PhoneOff /> End Call
           </Button>
         </div>
       </div>
