@@ -7,14 +7,13 @@ import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Calendar, FileText, Bell, LogOut, Activity, Brain, Folder } from 'lucide-react';
+import { Calendar, FileText, Bell, LogOut, Activity, Folder } from 'lucide-react';
 import BookAppointmentDialog from './BookAppointmentDialog';
 import AppointmentsList from './AppointmentsList';
 import ConsultationsList from './ConsultationsList';
 import NotificationsList from './NotificationsList';
 import GeneralPhysicianChat from './GeneralPhysicianChat';
 import MedicalRecordsList from './MedicalRecordsList';
-import AIInsightsList from './AIInsightsList';
 
 interface PatientDashboardProps {
   user: User;
@@ -57,11 +56,17 @@ const PatientDashboard = ({ user }: PatientDashboardProps) => {
               <Activity className="w-6 h-6 text-primary-foreground" />
             </div>
             <div>
-              <h1 className="text-xl font-bold bg-gradient-to-r from-primary to-primary/70 bg-clip-text text-transparent">HealthCare Portal</h1>
+              <h1 className="text-xl font-bold bg-gradient-to-r from-primary to-primary/70 bg-clip-text text-transparent">
+                HealthCare Portal
+              </h1>
               <p className="text-sm text-muted-foreground">Welcome, {profile?.full_name}</p>
             </div>
           </div>
-          <Button variant="outline" onClick={handleSignOut} className="hover:bg-destructive/10 hover:text-destructive hover:border-destructive transition-colors">
+          <Button
+            variant="outline"
+            onClick={handleSignOut}
+            className="hover:bg-destructive/10 hover:text-destructive hover:border-destructive transition-colors"
+          >
             <LogOut className="w-4 h-4 mr-2" />
             Logout
           </Button>
@@ -76,24 +81,24 @@ const PatientDashboard = ({ user }: PatientDashboardProps) => {
           <GeneralPhysicianChat patientId={user.id} />
         </div>
 
+        {/* FIXED: Now only 4 tabs, so grid-cols-4 */}
         <Tabs defaultValue="appointments" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-5 bg-muted/50 p-1.5 h-auto">
+          <TabsList className="grid w-full grid-cols-4 bg-muted/50 p-1.5 h-auto">
             <TabsTrigger value="appointments" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <Calendar className="w-4 h-4 mr-2" />
               Appointments
             </TabsTrigger>
+
             <TabsTrigger value="consultations" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <FileText className="w-4 h-4 mr-2" />
               Consultations
             </TabsTrigger>
+
             <TabsTrigger value="records" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <Folder className="w-4 h-4 mr-2" />
               Records
             </TabsTrigger>
-            <TabsTrigger value="insights" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
-              <Brain className="w-4 h-4 mr-2" />
-              AI Insights
-            </TabsTrigger>
+
             <TabsTrigger value="notifications" className="data-[state=active]:bg-background data-[state=active]:shadow-md py-3">
               <Bell className="w-4 h-4 mr-2" />
               Notifications
@@ -141,21 +146,6 @@ const PatientDashboard = ({ user }: PatientDashboardProps) => {
               </CardHeader>
               <CardContent>
                 <MedicalRecordsList patientId={user.id} />
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="insights" className="animate-in fade-in-50 duration-300">
-            <Card className="border-secondary/10">
-              <CardHeader>
-                <CardTitle className="text-2xl flex items-center gap-2">
-                  <Brain className="w-6 h-6 text-secondary" />
-                  AI Health Insights
-                </CardTitle>
-                <CardDescription>Get personalized health recommendations powered by AI</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <AIInsightsList patientId={user.id} />
               </CardContent>
             </Card>
           </TabsContent>

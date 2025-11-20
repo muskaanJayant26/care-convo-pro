@@ -423,11 +423,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
       {/* Input */}
       <div className="p-4 border-t bg-card space-y-3">
-        {onBookGeneralPhysician && (
+        {/* {onBookGeneralPhysician && (
           <Button onClick={onBookGeneralPhysician} variant="outline" className="w-full">
             Book General Physician Appointment
           </Button>
-        )}
+        )} */}
 
         <div className="flex gap-2">
           <Input
